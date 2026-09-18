@@ -1,0 +1,31 @@
+{
+  "name": "BPCL Earthing Testing App - By CLR FACILITY SERVICES",
+  "short_name": "Earthing App",
+  "description": "BPCL Retail Outlet Earth Pit Testing, Offline Inspections & Compliance Monitoring",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0056b3",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "assets/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ],
+  "categories": ["business", "utilities", "productivity"]
+}
