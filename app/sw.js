@@ -1,5 +1,5 @@
 // Service Worker for BPCL Earthing Testing App (By CLR FACILITY SERVICES)
-const CACHE_NAME = 'bpcl-earthing-v4.2';
+const CACHE_NAME = 'bpcl-earthing-v4.3';
 
 const STATIC_ASSETS = [
   './',

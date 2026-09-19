@@ -907,24 +907,31 @@ function renderUpdateTestView() {
                 </div>
 
                 <!-- Value Adjuster -->
-                <div class="flex items-center gap-2">
-                  <button type="button" onclick="adjustMstValue(${idx}, -0.1)" class="h-11 w-11 rounded-lg bg-white border border-slate-300 text-slate-700 font-bold text-lg hover:bg-slate-100 flex items-center justify-center shrink-0 shadow-sm active:scale-95 transition">
-                    -
+                <div class="flex items-center gap-1.5">
+                  <button type="button" onclick="adjustMstValue(${idx}, -0.1)" class="h-11 px-2.5 rounded-lg bg-white border border-slate-300 text-slate-700 font-bold text-xs hover:bg-slate-100 flex items-center justify-center shrink-0 shadow-sm active:scale-95 transition" title="Decrease by 0.1 Ω">
+                    -0.1
+                  </button>
+                  <button type="button" onclick="adjustMstValue(${idx}, -0.01)" class="h-11 px-2 rounded-lg bg-white border border-slate-200 text-slate-600 font-semibold text-[11px] hover:bg-slate-100 flex items-center justify-center shrink-0 shadow-sm active:scale-95 transition" title="Decrease by 0.01 Ω">
+                    -0.01
                   </button>
 
                   <div class="relative flex-1">
                     <input 
                       type="number" 
-                      step="0.1" 
-                      value="${val.toFixed(1)}" 
+                      step="0.01" 
+                      min="0.01"
+                      value="${Number(val).toFixed(2)}" 
                       onchange="setMstValue(${idx}, this.value)"
                       class="w-full h-11 text-center font-mono font-bold text-lg rounded-lg border ${isHigh ? 'border-orange-400 bg-orange-50 text-orange-900' : 'border-slate-300 bg-white text-slate-900'} focus:ring-2 focus:ring-blue-500 focus:outline-none"
                     />
                     <span class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 font-semibold">&Omega;</span>
                   </div>
 
-                  <button type="button" onclick="adjustMstValue(${idx}, 0.1)" class="h-11 w-11 rounded-lg bg-white border border-slate-300 text-slate-700 font-bold text-lg hover:bg-slate-100 flex items-center justify-center shrink-0 shadow-sm active:scale-95 transition">
-                    +
+                  <button type="button" onclick="adjustMstValue(${idx}, 0.01)" class="h-11 px-2 rounded-lg bg-white border border-slate-200 text-slate-600 font-semibold text-[11px] hover:bg-slate-100 flex items-center justify-center shrink-0 shadow-sm active:scale-95 transition" title="Increase by 0.01 Ω">
+                    +0.01
+                  </button>
+                  <button type="button" onclick="adjustMstValue(${idx}, 0.1)" class="h-11 px-2.5 rounded-lg bg-white border border-slate-300 text-slate-700 font-bold text-xs hover:bg-slate-100 flex items-center justify-center shrink-0 shadow-sm active:scale-95 transition" title="Increase by 0.1 Ω">
+                    +0.1
                   </button>
                 </div>
 
@@ -1065,13 +1072,14 @@ window.selectMstStation = (id) => {
 
 window.adjustMstValue = (idx, delta) => {
   let val = parseFloat(mstPitsData[idx].gridEarthValue) || 0;
-  val = Math.max(0.1, Number((val + delta).toFixed(1)));
+  val = Math.max(0.01, Number((val + delta).toFixed(2)));
   mstPitsData[idx].gridEarthValue = val;
   renderUpdateTestView();
 };
 
 window.setMstValue = (idx, val) => {
-  mstPitsData[idx].gridEarthValue = Math.max(0.1, parseFloat(val) || 0.1);
+  const parsed = parseFloat(val);
+  mstPitsData[idx].gridEarthValue = isNaN(parsed) ? 0.01 : Math.max(0.01, Number(parsed.toFixed(2)));
   renderUpdateTestView();
 };
 
@@ -1518,7 +1526,7 @@ function renderDashboard() {
                 </tr>
               ` : cardPageItems.map(r => {
                 const pits = r.pits || [];
-                const maxVal = pits.length > 0 ? Math.max(...pits.map(p => Number(p.gridEarthValue || 0))).toFixed(1) : "0.0";
+                const maxVal = pits.length > 0 ? Math.max(...pits.map(p => Number(p.gridEarthValue || 0))).toFixed(2) : "0.00";
                 const isHigh = Number(maxVal) > 2.0;
                 const retestInfo = getRetestStatus(r);
                 const actionInfo = getActionToBeTaken(r);
@@ -1786,7 +1794,7 @@ function renderReports() {
         ${pageItems.map(r => {
           const pits = r.pits || [];
           const hasAlert = pits.some(p => Number(p.gridEarthValue) > 2.0);
-          const maxVal = Math.max(...pits.map(p => Number(p.gridEarthValue || 0))).toFixed(1);
+          const maxVal = Math.max(...pits.map(p => Number(p.gridEarthValue || 0))).toFixed(2);
           const retestInfo = getRetestStatus(r);
           const actionInfo = getActionToBeTaken(r);
 
@@ -2368,10 +2376,10 @@ function renderHsseAuditView() {
                     <!-- Max Resistance -->
                     <td class="px-4 py-3.5">
                       <div class="font-mono font-bold text-xs ${isCritical ? 'text-red-600' : 'text-orange-600'}">
-                        ${maxVal.toFixed(1)} &Omega;
+                        ${maxVal.toFixed(2)} &Omega;
                       </div>
                       <div class="text-[9px] text-slate-400">
-                        +${(maxVal - 2.0).toFixed(1)} &Omega; over
+                        +${(maxVal - 2.0).toFixed(2)} &Omega; over
                       </div>
                     </td>
 
@@ -2490,8 +2498,8 @@ function renderReportDetail(reportId) {
   const isCompliant = outOfRange.length === 0;
 
   const vals = pits.map(p => Number(p.gridEarthValue || 0));
-  const minVal = vals.length > 0 ? Math.min(...vals).toFixed(1) : "0.0";
-  const maxVal = vals.length > 0 ? Math.max(...vals).toFixed(1) : "0.0";
+  const minVal = vals.length > 0 ? Math.min(...vals).toFixed(2) : "0.00";
+  const maxVal = vals.length > 0 ? Math.max(...vals).toFixed(2) : "0.00";
   const avgVal = vals.length > 0 ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2) : "0.00";
 
   const html = `
@@ -2659,7 +2667,7 @@ function renderReportDetail(reportId) {
                       ${escapeHtml(p.location || 'Retail Outlet Forecourt')}
                     </td>
                     <td class="px-6 py-4 text-center font-mono font-bold text-sm ${ok ? 'text-slate-900' : isCritical ? 'text-red-600' : 'text-orange-600'}">
-                      ${val.toFixed(1)} &Omega;
+                      ${val.toFixed(2)} &Omega;
                     </td>
                     <td class="px-6 py-4">
                       <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold ${ok ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : isCritical ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-orange-50 text-orange-700 border border-orange-200'}">
@@ -2739,7 +2747,7 @@ window.downloadReportPdf = function(reportId) {
       p.pitNumber,
       p.equipmentConnected || 'Main Ground Grid',
       p.location || 'Forecourt',
-      Number(p.gridEarthValue || 0).toFixed(1) + " Ohm",
+      Number(p.gridEarthValue || 0).toFixed(2) + " Ohm",
       Number(p.gridEarthValue) <= 2.0 ? "PASSED (<= 2.0 Ohm)" : "FAILED (> 2.0 Ohm)",
       p.remarks || (Number(p.gridEarthValue) <= 2.0 ? "Normal" : "Needs Watering")
     ]);
@@ -3094,10 +3102,11 @@ function renderReportForm(reportId = null) {
                       <div class="relative">
                         <input
                           type="number"
-                          step="0.1"
+                          step="0.01"
+                          min="0.01"
                           name="gridEarthValue_${idx}"
                           id="pit-val-${idx}"
-                          value="${val.toFixed(1)}"
+                          value="${Number(val).toFixed(2)}"
                           oninput="updateFormPitStatus(${idx})"
                           class="w-full h-8 pl-2.5 pr-6 rounded-lg border ${isHigh ? 'border-orange-400 bg-orange-50 font-bold text-orange-950' : 'border-slate-200 text-slate-800 font-bold'} text-xs font-mono"
                         />
@@ -3205,10 +3214,11 @@ function renderReportForm(reportId = null) {
             <div class="relative">
               <input
                 type="number"
-                step="0.1"
+                step="0.01"
+                min="0.01"
                 name="gridEarthValue_${idx}"
                 id="pit-val-${idx}"
-                value="${val.toFixed(1)}"
+                value="${Number(val).toFixed(2)}"
                 oninput="updateFormPitStatus(${idx})"
                 class="w-full h-8 pl-2.5 pr-6 rounded-lg border ${isHigh ? 'border-orange-400 bg-orange-50 font-bold text-orange-950' : 'border-slate-200 text-slate-800 font-bold'} text-xs font-mono"
               />
