@@ -688,7 +688,7 @@ function escapeHtml(str) {
 
 let chartInstances = {};
 let dashboardFilters = { salesArea: 'all', eoName: 'all', mstName: 'all' };
-let dashboardActiveCard = 'due'; // Default to 'due' so Test Due Sites are immediately visible!
+let dashboardActiveCard = 'all'; // Default to 'all' as shown in live user screenshot
 let dashboardTableSearch = '';
 let dashboardTablePage = 1;
 let dashboardTablePageSize = 10;
