@@ -197,17 +197,21 @@ const store = new Store();
 // ==========================================
 // 3. GOOGLE SHEETS & GOOGLE DRIVE SYNC ENGINE
 // ==========================================
-// Permanent Master Google Apps Script Webhook (Protected from modification)
+// Master Google Apps Script Webhook (Protected by Admin Password)
 const MASTER_GAS_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwso4z8vCscz18bRUIeXSjfHiSY3oOjsFwdF0-A_7Fi8gmyKEpCEWiW7afN4zdn446AOQ/exec";
 const DEFAULT_GAS_URL = MASTER_GAS_WEBHOOK_URL;
 
 function getGoogleWebhookUrl() {
-  return MASTER_GAS_WEBHOOK_URL;
+  const saved = localStorage.getItem('bpcl_google_webhook_url');
+  return (saved && saved.trim()) ? saved.trim() : MASTER_GAS_WEBHOOK_URL;
 }
 
 function setGoogleWebhookUrl(url) {
-  // Permanently locked - cannot be modified by any user
-  localStorage.setItem('bpcl_google_webhook_url', MASTER_GAS_WEBHOOK_URL);
+  if (url && url.trim() && url.trim() !== MASTER_GAS_WEBHOOK_URL) {
+    localStorage.setItem('bpcl_google_webhook_url', url.trim());
+  } else {
+    localStorage.removeItem('bpcl_google_webhook_url');
+  }
 }
 
 function getSyncLogs() {
@@ -2871,10 +2875,13 @@ function handleExcelUpload(file) {
 // ==========================================
 // 9. VIEW 5: GOOGLE SYNC HUB (#/google-sync)
 // ==========================================
+let isGoogleSyncUnlocked = false;
+
 function renderGoogleSyncView() {
   const currentUrl = getGoogleWebhookUrl();
   const logs = getSyncLogs();
   const queue = getPendingQueue();
+  const isCustom = (currentUrl !== MASTER_GAS_WEBHOOK_URL);
 
   const html = `
     <div class="space-y-6 fade-in max-w-4xl mx-auto pb-16">
@@ -2900,43 +2907,78 @@ function renderGoogleSyncView() {
       <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
         <div class="flex items-center justify-between border-b border-slate-100 pb-3">
           <div class="flex items-center gap-2.5">
-            <div class="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
-              <i data-lucide="cloud" class="h-5 w-5"></i>
+            <div class="w-10 h-10 rounded-lg ${isGoogleSyncUnlocked ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'} flex items-center justify-center">
+              <i data-lucide="${isGoogleSyncUnlocked ? 'unlock' : 'cloud'}" class="h-5 w-5"></i>
             </div>
             <div>
               <h2 class="text-sm font-bold text-slate-900">Master Google Apps Script Webhook</h2>
-              <p class="text-[11px] text-slate-400">Centrally locked production endpoint &bull; All submissions auto-push here</p>
+              <p class="text-[11px] text-slate-400">
+                ${isGoogleSyncUnlocked ? 'Administrator Mode Active &bull; Endpoint can now be edited' : 'Centrally locked production endpoint &bull; Protected by password ("Patil")'}
+              </p>
             </div>
           </div>
-          <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
-            <i data-lucide="lock" class="h-3 w-3"></i>
-            <span>Protected &bull; Active</span>
-          </span>
+          ${isGoogleSyncUnlocked ? `
+            <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
+              <i data-lucide="unlock" class="h-3 w-3"></i>
+              <span>Admin Mode &bull; Unlocked</span>
+            </span>
+          ` : `
+            <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1.5">
+              <i data-lucide="lock" class="h-3 w-3"></i>
+              <span>Locked &bull; Tamper-Proof</span>
+            </span>
+          `}
         </div>
 
         <div class="space-y-2.5">
           <div class="flex flex-col sm:flex-row gap-2">
             <div class="relative flex-1">
-              <i data-lucide="lock" class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400"></i>
+              <i data-lucide="${isGoogleSyncUnlocked ? 'link' : 'lock'}" class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 ${isGoogleSyncUnlocked ? 'text-blue-500' : 'text-slate-400'}"></i>
               <input 
                 type="url" 
                 id="google-webhook-input" 
-                readonly 
-                disabled
-                value="${escapeHtml(MASTER_GAS_WEBHOOK_URL)}" 
-                class="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-200 bg-slate-100 text-slate-700 font-mono select-all cursor-not-allowed"
+                ${isGoogleSyncUnlocked ? '' : 'readonly disabled'}
+                value="${escapeHtml(currentUrl)}" 
+                placeholder="https://script.google.com/macros/s/.../exec"
+                class="w-full pl-9 pr-3 py-2 text-xs rounded-lg border ${isGoogleSyncUnlocked ? 'border-blue-400 bg-white text-slate-900 focus:ring-2 focus:ring-blue-500' : 'border-slate-200 bg-slate-100 text-slate-700 font-mono select-all cursor-not-allowed'}"
               />
             </div>
-            <div class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold shrink-0 shadow-xs">
-              <i data-lucide="shield-check" class="h-4 w-4 text-emerald-600"></i>
-              <span>Locked by Administrator</span>
-            </div>
+            ${isGoogleSyncUnlocked ? `
+              <div class="flex items-center gap-1.5 shrink-0 flex-wrap sm:flex-nowrap">
+                <button onclick="saveWebhookSettings()" class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow transition cursor-pointer">
+                  <i data-lucide="check" class="h-3.5 w-3.5"></i>
+                  <span>Save URL</span>
+                </button>
+                <button onclick="resetWebhookSettings()" class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-xs font-semibold transition cursor-pointer" title="Reset to Master Webhook URL">
+                  <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>
+                  <span>Reset</span>
+                </button>
+                <button onclick="lockGoogleSync()" class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition cursor-pointer" title="Lock Settings">
+                  <i data-lucide="lock" class="h-3.5 w-3.5"></i>
+                  <span>Lock</span>
+                </button>
+              </div>
+            ` : `
+              <button onclick="promptUnlockGoogleSync()" class="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shrink-0 shadow transition cursor-pointer">
+                <i data-lucide="key" class="h-4 w-4"></i>
+                <span>Unlock to Edit</span>
+              </button>
+            `}
           </div>
-          <p class="text-[11px] text-slate-500 flex items-center gap-1.5">
-            <i data-lucide="info" class="h-3.5 w-3.5 text-blue-600 shrink-0"></i>
-            <span>This script endpoint is permanent. Whosoever accesses the application cannot modify or tamper with this URL.</span>
-          </p>
-          <p class="text-[11px] text-slate-400">Target Sheet: <strong>BPCL_Earthing_Testing_Records</strong> &bull; Target Drive Folder: <strong>BPCL_Earthing_Photos</strong></p>
+
+          ${isGoogleSyncUnlocked ? `
+            <p class="text-[11px] text-emerald-700 font-medium flex items-center gap-1.5">
+              <i data-lucide="check-circle" class="h-3.5 w-3.5 shrink-0 text-emerald-600"></i>
+              <span>Administrator mode active. Modify the URL above and click <strong>Save URL</strong>, or click <strong>Reset</strong> to restore default.</span>
+            </p>
+          ` : `
+            <p class="text-[11px] text-slate-500 flex items-center gap-1.5">
+              <i data-lucide="shield" class="h-3.5 w-3.5 text-amber-600 shrink-0"></i>
+              <span>Locked for standard operators. Click <strong>Unlock to Edit</strong> and enter administrator password ("Patil") to modify.</span>
+            </p>
+          `}
+
+          <p class="text-[11px] text-slate-400">Target Sheet: <strong>BPCL_Earthing_Testing_Records</strong> &bull; Target Drive Folder: <strong>BPCL_Earthing_Photos</strong> ${isCustom ? '<span class="text-amber-600 font-bold ml-1">(Custom URL active)</span>' : ''}</p>
         </div>
       </div>
 
@@ -3006,12 +3048,123 @@ function renderGoogleSyncView() {
   lucide.createIcons();
 }
 
+window.promptUnlockGoogleSync = () => {
+  const existing = document.getElementById('admin-unlock-modal');
+  if (existing) existing.remove();
+
+  const modalHtml = `
+    <div id="admin-unlock-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+      <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-sm w-full p-6 space-y-4">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+            <i data-lucide="shield-alert" class="h-5 w-5"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-slate-900 font-display">Administrator Unlock</h3>
+            <p class="text-xs text-slate-500">Enter password to edit Google Sync endpoint</p>
+          </div>
+        </div>
+
+        <div class="space-y-1.5">
+          <label class="block text-xs font-semibold text-slate-700">Administrator Password</label>
+          <input 
+            type="password" 
+            id="admin-unlock-password-input" 
+            placeholder="Enter password..."
+            class="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+            onkeydown="if(event.key === 'Enter') submitAdminUnlock()"
+            autofocus
+          />
+          <p id="admin-unlock-error" class="text-xs text-rose-600 font-medium hidden">Incorrect password. Access denied.</p>
+        </div>
+
+        <div class="flex items-center justify-end gap-2 pt-2">
+          <button 
+            type="button" 
+            onclick="closeAdminUnlockModal()" 
+            class="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+          >
+            Cancel
+          </button>
+          <button 
+            type="button" 
+            onclick="submitAdminUnlock()" 
+            class="px-4 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-lg shadow transition flex items-center gap-1.5"
+          >
+            <i data-lucide="key" class="h-3.5 w-3.5"></i>
+            <span>Unlock</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  lucide.createIcons();
+  setTimeout(() => {
+    const input = document.getElementById('admin-unlock-password-input');
+    if (input) input.focus();
+  }, 100);
+};
+
+window.closeAdminUnlockModal = () => {
+  const modal = document.getElementById('admin-unlock-modal');
+  if (modal) modal.remove();
+};
+
+window.submitAdminUnlock = () => {
+  const input = document.getElementById('admin-unlock-password-input');
+  const errorEl = document.getElementById('admin-unlock-error');
+  const password = input ? input.value : '';
+
+  if (password === 'Patil') {
+    isGoogleSyncUnlocked = true;
+    closeAdminUnlockModal();
+    showToast({ title: "Unlocked Successfully", description: "Google Sync settings are now editable.", variant: "success" });
+    renderGoogleSyncView();
+  } else {
+    if (errorEl) errorEl.classList.remove('hidden');
+    if (input) {
+      input.classList.add('border-rose-500', 'focus:ring-rose-500');
+      input.value = '';
+      input.focus();
+    }
+    showToast({ title: "Access Denied", description: "Incorrect password. Settings remain locked.", variant: "destructive" });
+  }
+};
+
+window.lockGoogleSync = () => {
+  isGoogleSyncUnlocked = false;
+  showToast({ title: "Settings Locked", description: "Google Sync settings have been locked.", variant: "default" });
+  renderGoogleSyncView();
+};
+
 window.saveWebhookSettings = () => {
-  showToast({ title: "Settings Locked", description: "The Master Google Webhook URL is permanently locked by the administrator.", variant: "default" });
+  if (!isGoogleSyncUnlocked) {
+    showToast({ title: "Settings Locked", description: "Please unlock with administrator password ('Patil') to edit.", variant: "destructive" });
+    return;
+  }
+  const input = document.getElementById('google-webhook-input');
+  if (!input) return;
+  const val = input.value.trim();
+  if (!val || !val.startsWith('http')) {
+    showToast({ title: "Invalid URL", description: "Please enter a valid Webhook URL starting with http:// or https://.", variant: "destructive" });
+    return;
+  }
+  setGoogleWebhookUrl(val);
+  showToast({ title: "Settings Saved", description: "Master Google Webhook URL has been updated.", variant: "success" });
+  renderGoogleSyncView();
+};
+
+window.resetWebhookSettings = () => {
+  if (!isGoogleSyncUnlocked) return;
+  setGoogleWebhookUrl(MASTER_GAS_WEBHOOK_URL);
+  showToast({ title: "Reset Complete", description: "Restored default Master Webhook URL.", variant: "success" });
+  renderGoogleSyncView();
 };
 
 window.testGoogleConnection = async () => {
-  const url = MASTER_GAS_WEBHOOK_URL;
+  const url = getGoogleWebhookUrl();
   showToast({ title: "Testing Connection", description: "Pinging Master Google Apps Script endpoint...", variant: "default" });
 
   try {
