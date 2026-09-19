@@ -310,27 +310,44 @@ async function pushToGoogle(reportData, photosArray = []) {
   }
 
   if (!webhookUrl) {
-    // Simulated successful connection for instant demo & readiness
-    logEntry.status = 'Ready / Local Cached';
-    logEntry.details = `Google Sheet formatted. Photos ready for Drive. (Configure Webhook in 'Google Sync' menu to activate live webhook)`;
+    addToPendingQueue(payload);
+    logEntry.status = 'Queued (No Webhook)';
+    logEntry.details = 'Inspection saved locally. Webhook URL not configured.';
     addSyncLog(logEntry);
-    showToast({
-      title: "Inspection Saved & Google Ready",
-      description: `Data recorded for ${reportData.siteName}. Set your Google Apps Script URL in 'Google Sync' to stream live to Drive.`,
-      variant: "success"
-    });
     return;
   }
 
   try {
     showToast({ title: "Google Sync", description: "Pushing inspection row to Google Sheet & uploading photos to Google Drive...", variant: "default" });
 
-    await fetch(webhookUrl, {
+    // Step 1: Probe endpoint reachability to avoid silent 403 drops
+    let endpointReachable = false;
+    try {
+      const probe = await fetch(webhookUrl, { method: "GET" });
+      if (probe.ok) endpointReachable = true;
+    } catch(probeErr) {
+      endpointReachable = false;
+    }
+
+    if (!endpointReachable) {
+      throw new Error("Google Webhook rejected connection (HTTP 403 Access Denied: You need access). Ensure deployment has 'Who has access: Anyone'.");
+    }
+
+    // Step 2: Post payload with text/plain (avoids CORS preflight rejection)
+    const resp = await fetch(webhookUrl, {
       method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload)
     });
+
+    if (!resp.ok) {
+      throw new Error(`Google Webhook returned HTTP ${resp.status}`);
+    }
+
+    const resData = await resp.json().catch(() => null);
+    if (resData && resData.status === "error") {
+      throw new Error(resData.message || "Google Apps Script internal execution error");
+    }
 
     logEntry.status = 'Synced to Google';
     logEntry.details = `Pushed row to Google Sheet & uploaded ${photosArray.length} photo(s) to Google Drive.`;
@@ -344,43 +361,108 @@ async function pushToGoogle(reportData, photosArray = []) {
   } catch (err) {
     console.error("Google sync error:", err);
     addToPendingQueue(payload);
-    logEntry.status = 'Queued (Retry)';
-    logEntry.details = 'Network error pushing to Google Webhook. Queued for auto-retry.';
+    logEntry.status = 'Sync Blocked (403)';
+    logEntry.details = `Data saved locally. Google rejected push: ${err.message}`;
     addSyncLog(logEntry);
+
+    showToast({
+      title: "Google Sync Blocked (403)",
+      description: "Inspection saved locally on device. Google rejected cloud sync (403 Access Denied). Check 'Google Sync' tab for the 30-sec fix.",
+      variant: "destructive"
+    });
   }
 }
+
+// Push all pending queue records
+window.syncPendingQueueNow = async () => {
+  const queue = getPendingQueue();
+  if (queue.length === 0) {
+    showToast({ title: "No Pending Records", description: "All inspections are up to date.", variant: "default" });
+    return;
+  }
+
+  const webhookUrl = getGoogleWebhookUrl();
+  if (!webhookUrl) {
+    showToast({ title: "No Webhook URL", description: "Please configure Google Apps Script Webhook URL.", variant: "destructive" });
+    return;
+  }
+
+  showToast({ title: "Syncing Pending Queue", description: `Pushing ${queue.length} inspection(s) to Google Sheet & Drive...`, variant: "default" });
+
+  // Probe endpoint first
+  try {
+    const probe = await fetch(webhookUrl, { method: "GET" });
+    if (!probe.ok) throw new Error("Probe not OK");
+  } catch(e) {
+    showToast({
+      title: "Google Webhook Blocked (403)",
+      description: "Cannot sync pending records: Google deployment is still blocking access. Please set 'Who has access: Anyone' first.",
+      variant: "destructive"
+    });
+    if (window.showGoogleSyncDiagnosticModal) {
+      window.showGoogleSyncDiagnosticModal("HTTP 403: Access Denied");
+    }
+    return;
+  }
+
+  let successCount = 0;
+  const remaining = [];
+
+  for (const item of queue) {
+    try {
+      const resp = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(item)
+      });
+      if (resp.ok) {
+        successCount++;
+        addSyncLog({
+          id: 'sync-' + Date.now() + '-' + Math.random(),
+          timestamp: new Date().toLocaleTimeString() + ', ' + new Date().toLocaleDateString(),
+          roid: item.roid,
+          siteName: item.siteName,
+          photoCount: (item.photos || []).length,
+          status: 'Synced to Google',
+          details: 'Successfully pushed pending queue inspection to Google Sheet & Drive.'
+        });
+      } else {
+        remaining.push(item);
+      }
+    } catch(err) {
+      remaining.push(item);
+    }
+  }
+
+  if (remaining.length === 0) {
+    clearPendingQueue();
+    showToast({
+      title: "All Records Synced!",
+      description: `Successfully pushed ${successCount} inspection(s) to Google Sheets & Drive.`,
+      variant: "success"
+    });
+  } else {
+    try { localStorage.setItem('bpcl_google_pending_queue', JSON.stringify(remaining)); } catch(e) {}
+    updatePendingBadge();
+    showToast({
+      title: "Partial Sync",
+      description: `Synced ${successCount} record(s). ${remaining.length} record(s) remaining in queue.`,
+      variant: "default"
+    });
+  }
+
+  const activeHash = window.location.hash || '#/';
+  if (activeHash === '#/google-sync') {
+    renderGoogleSyncView();
+  }
+};
 
 // Auto-flush pending queue when internet reconnects
 window.addEventListener('online', async () => {
   const queue = getPendingQueue();
-  if (queue.length === 0) return;
-
-  const webhookUrl = getGoogleWebhookUrl();
-  if (!webhookUrl) return;
-
-  showToast({ title: "Network Restored", description: `Pushing ${queue.length} pending inspections to Google Sheets & Drive...`, variant: "default" });
-
-  for (const item of queue) {
-    try {
-      await fetch(webhookUrl, {
-        method: "POST",
-        mode: "no-cors",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(item)
-      });
-      addSyncLog({
-        id: 'sync-' + Date.now(),
-        timestamp: new Date().toLocaleTimeString(),
-        roid: item.roid,
-        siteName: item.siteName,
-        photoCount: (item.photos || []).length,
-        status: 'Synced to Google',
-        details: 'Auto-flushed from offline queue.'
-      });
-    } catch(e) {}
+  if (queue.length > 0) {
+    window.syncPendingQueueNow();
   }
-  clearPendingQueue();
-  showToast({ title: "Offline Queue Flushed", description: "All offline inspections synced with Google Sheets & Drive.", variant: "success" });
 });
 
 
@@ -2982,6 +3064,50 @@ function renderGoogleSyncView() {
         </div>
       </div>
 
+      <!-- Pending Offline Queue Banner -->
+      ${queue.length > 0 ? `
+        <div class="bg-amber-50 border border-amber-300 rounded-xl p-4 shadow-sm space-y-3">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div class="flex items-center gap-2.5">
+              <div class="w-8 h-8 rounded-lg bg-amber-200 text-amber-900 flex items-center justify-center shrink-0">
+                <i data-lucide="clock" class="h-4 w-4"></i>
+              </div>
+              <div>
+                <h3 class="text-sm font-bold text-amber-900">${queue.length} Inspection(s) Pending in Local Queue</h3>
+                <p class="text-[11px] text-amber-700">Stored safely on device. Once Webhook is set to 'Anyone', click Push to sync.</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button onclick="syncPendingQueueNow()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow transition cursor-pointer">
+                <i data-lucide="send" class="h-3.5 w-3.5"></i>
+                <span>Push All Pending Now (${queue.length})</span>
+              </button>
+              <button onclick="if(confirm('Clear offline pending queue?')){clearPendingQueue();renderGoogleSyncView();}" class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-600 border border-slate-300 text-xs font-medium transition cursor-pointer">
+                <i data-lucide="trash-2" class="h-3.5 w-3.5 text-rose-500"></i>
+                <span>Clear</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- 403 Diagnostics Quick Card -->
+      <div class="bg-amber-50/70 border border-amber-200 rounded-xl p-4 shadow-sm space-y-2">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i data-lucide="shield-alert" class="h-4 w-4 text-amber-600"></i>
+            <h3 class="text-xs font-bold text-amber-900 uppercase tracking-wider">Troubleshooting Cloud Sync (Why data may not save)</h3>
+          </div>
+          <button onclick="showGoogleSyncDiagnosticModal()" class="text-xs font-bold text-blue-700 hover:text-blue-800 underline flex items-center gap-1 cursor-pointer">
+            <span>View 30-Sec Fix Guide</span>
+            <i data-lucide="chevron-right" class="h-3.5 w-3.5"></i>
+          </button>
+        </div>
+        <p class="text-[11px] text-amber-800 leading-relaxed">
+          If inspection rows or photos are not appearing in Google Sheets/Drive, Google's server is rejecting connections with <strong>HTTP 403: Access Denied</strong>. In Google Apps Script, go to <strong>Deploy &gt; Manage deployments &gt; Edit</strong> and set <strong>Who has access: "Anyone"</strong>.
+        </p>
+      </div>
+
       <!-- 1-Minute Setup Guide & Copy Script Accordion -->
       <div class="bg-gradient-to-br from-slate-900 to-blue-950 text-white rounded-xl p-5 shadow-sm space-y-4">
         <div class="flex items-center justify-between">
@@ -3004,7 +3130,7 @@ function renderGoogleSyncView() {
           <p>2. Click <strong>Extensions &gt; Apps Script</strong></p>
           <p>3. Paste the copied code into <strong>Code.gs</strong></p>
           <p>4. Click <strong>Deploy &gt; New deployment &gt; Select type: Web app</strong></p>
-          <p>5. Set Execute as: <strong>"Me"</strong> and Who has access: <strong>"Anyone"</strong></p>
+          <p class="text-amber-300 font-bold">5. Set Execute as: "Me" and Who has access: "Anyone" (MANDATORY: If left as "Only myself", Google blocks all phones with 403 Access Denied)</p>
           <p>6. Click <strong>Deploy</strong> and paste the URL into the box above!</p>
         </div>
       </div>
@@ -3032,7 +3158,7 @@ function renderGoogleSyncView() {
                 <div class="flex items-center gap-2">
                   <span class="font-bold text-slate-900">${escapeHtml(l.siteName || 'Retail Outlet')}</span>
                   ${l.roid ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-800">ROID: ${escapeHtml(l.roid)}</span>` : ''}
-                  <span class="px-2 py-0.5 rounded text-[10px] font-bold ${l.status.includes('Synced') ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'}">${escapeHtml(l.status)}</span>
+                  <span class="px-2 py-0.5 rounded text-[10px] font-bold ${l.status.includes('Synced') ? 'bg-emerald-100 text-emerald-800' : (l.status.includes('Blocked') || l.status.includes('Failed') ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800')}">${escapeHtml(l.status)}</span>
                 </div>
                 <p class="text-[11px] text-slate-400">${escapeHtml(l.details)} &bull; ${l.photoCount || 0} Drive photos</p>
               </div>
@@ -3165,19 +3291,141 @@ window.resetWebhookSettings = () => {
 
 window.testGoogleConnection = async () => {
   const url = getGoogleWebhookUrl();
-  showToast({ title: "Testing Connection", description: "Pinging Master Google Apps Script endpoint...", variant: "default" });
+  if (!url || !url.startsWith('http')) {
+    showToast({ title: "Invalid URL", description: "Please enter a valid Webhook URL starting with http:// or https://.", variant: "destructive" });
+    return;
+  }
+
+  showToast({ title: "Testing Webhook", description: "Probing Google Apps Script endpoint...", variant: "default" });
 
   try {
-    await fetch(url, { 
-      method: "POST", 
-      mode: "no-cors", 
+    // Step 1: Probe GET endpoint with CORS
+    const probe = await fetch(url, { method: "GET" });
+    if (!probe.ok) {
+      throw new Error(`Google returned HTTP ${probe.status}: ${probe.statusText}`);
+    }
+    await probe.json().catch(() => null);
+
+    // Step 2: Probe POST ping
+    await fetch(url, {
+      method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "ping", timestamp: new Date().toISOString() }) 
+      body: JSON.stringify({ action: "ping", timestamp: new Date().toISOString() })
     });
-    showToast({ title: "Connection Ping Sent", description: "Ping request successfully delivered to master Google Apps Script endpoint.", variant: "success" });
+
+    showToast({
+      title: "✅ Connection Verified Live!",
+      description: "Google Apps Script Webhook is active, public, and accepting records.",
+      variant: "success"
+    });
   } catch(e) {
-    showToast({ title: "Connection Notice", description: "If 403 occurs in Apps Script, ensure Deployment access is set to 'Anyone'.", variant: "default" });
+    console.warn("Connection test failed:", e);
+    window.showGoogleSyncDiagnosticModal(e.message);
   }
+};
+
+window.showGoogleSyncDiagnosticModal = (errorDetails = "") => {
+  const existing = document.getElementById('google-diagnostic-modal');
+  if (existing) existing.remove();
+
+  const modalHtml = `
+    <div id="google-diagnostic-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+      <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-start gap-3">
+          <div class="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0 mt-0.5">
+            <i data-lucide="alert-triangle" class="h-5 w-5"></i>
+          </div>
+          <div class="flex-1">
+            <h3 class="text-base font-bold text-slate-900 font-display">Google Webhook Access Blocked (HTTP 403)</h3>
+            <p class="text-xs text-slate-500">Why your data was not saved to Google Sheets / Google Drive</p>
+          </div>
+          <button onclick="document.getElementById('google-diagnostic-modal').remove()" class="text-slate-400 hover:text-slate-600">
+            <i data-lucide="x" class="h-5 w-5"></i>
+          </button>
+        </div>
+
+        <div class="p-3.5 bg-rose-50 border border-rose-200 rounded-xl space-y-1 text-xs text-rose-900">
+          <div class="font-bold flex items-center gap-1.5">
+            <i data-lucide="shield-alert" class="h-4 w-4 text-rose-600"></i>
+            <span>Current Status: Access Denied (HTTP 403 Forbidden)</span>
+          </div>
+          <p class="text-[11px] text-rose-700">Google's server rejected incoming connections because your Apps Script Web App was deployed with restricted access (e.g. <em>"Only myself"</em>). As a result, Google stops requests before they can write rows or upload photos.</p>
+        </div>
+
+        <div class="space-y-3">
+          <h4 class="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+            <i data-lucide="check-circle-2" class="h-4 w-4 text-blue-600"></i>
+            <span>How to Fix in 30 Seconds:</span>
+          </h4>
+
+          <div class="space-y-2 text-xs text-slate-700 font-sans">
+            <div class="flex gap-2.5 items-start bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+              <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">1</span>
+              <div>
+                <p class="font-semibold text-slate-900">Open your Apps Script editor</p>
+                <p class="text-slate-500 text-[11px]">Go to <a href="https://script.google.com" target="_blank" class="text-blue-600 font-semibold underline">script.google.com</a> (or in your Sheet, click <strong>Extensions &gt; Apps Script</strong>).</p>
+              </div>
+            </div>
+
+            <div class="flex gap-2.5 items-start bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+              <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">2</span>
+              <div>
+                <p class="font-semibold text-slate-900">Edit your Web App deployment</p>
+                <p class="text-slate-500 text-[11px]">At the top right, click <strong>Deploy &gt; Manage deployments</strong> &rarr; click the <strong>✏️ Pencil (Edit)</strong> icon.</p>
+              </div>
+            </div>
+
+            <div class="flex gap-2.5 items-start bg-amber-50 p-2.5 rounded-lg border border-amber-200">
+              <span class="w-5 h-5 rounded-full bg-amber-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">3</span>
+              <div>
+                <p class="font-semibold text-amber-900">Set "Who has access" to "Anyone"</p>
+                <p class="text-amber-800 text-[11px]">Under <strong>Who has access</strong>, change it from <em>"Only myself"</em> to <strong class="underline">"Anyone"</strong>. Ensure <strong>Execute as</strong> is set to <strong>"Me"</strong>.</p>
+              </div>
+            </div>
+
+            <div class="flex gap-2.5 items-start bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+              <span class="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">4</span>
+              <div>
+                <p class="font-semibold text-slate-900">Click Deploy &amp; Authorize</p>
+                <p class="text-slate-500 text-[11px]">Click <strong>Deploy</strong>, grant permissions (Advanced &rarr; Allow), then come back and click <strong>Re-Test Connection</strong> below!</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between gap-2 pt-2 border-t border-slate-100">
+          <button 
+            type="button" 
+            onclick="copyAppsScriptCode()" 
+            class="px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg transition flex items-center gap-1 border border-slate-300"
+          >
+            <i data-lucide="copy" class="h-3.5 w-3.5"></i>
+            <span>Copy Code.gs</span>
+          </button>
+          <div class="flex items-center gap-2">
+            <button 
+              type="button" 
+              onclick="document.getElementById('google-diagnostic-modal').remove()" 
+              class="px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+            >
+              Close
+            </button>
+            <button 
+              type="button" 
+              onclick="document.getElementById('google-diagnostic-modal').remove(); testGoogleConnection();" 
+              class="px-3.5 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow transition flex items-center gap-1.5"
+            >
+              <i data-lucide="zap" class="h-3.5 w-3.5"></i>
+              <span>Re-Test Connection</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  lucide.createIcons();
 };
 
 window.copyAppsScriptCode = async () => {

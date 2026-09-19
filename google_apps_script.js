@@ -1,24 +1,25 @@
 /**
  * ====================================================================
- * BPCL EARTHING TESTING APP - GOOGLE APPS SCRIPT WEBHOOK
+ * BPCL EARTHING TESTING APP - GOOGLE APPS SCRIPT WEBHOOK (V3.8)
  * Automatically updates Google Sheet & uploads photos to Google Drive
  * Standard: IS 3043:2018 & OISD-STD-147
+ * Contractor: CLR FACILITY SERVICES
  * ====================================================================
  * 
- * SETUP INSTRUCTIONS (1 MINUTE):
- * 1. Open Google Sheets (https://sheets.new) and name it "BPCL_Earthing_Testing_Records".
- * 2. In Google Sheets, click Extensions > Apps Script.
- * 3. Delete any default code and paste this ENTIRE code into "Code.gs".
- * 4. Click Deploy > New deployment.
- * 5. Select type: "Web app".
- * 6. Set Description: "BPCL Earthing Sync Webhook".
- * 7. Execute as: "Me" (your Google account).
- * 8. Who has access: "Anyone" (allows phone app to push data without login).
- * 9. Click "Deploy" and authorize permissions.
- * 10. Copy the Web App URL (starts with https://script.google.com/macros/s/...)
- *     and paste it into the "Google Sync" menu in the Earthing Testing App!
+ * CRITICAL DEPLOYMENT SETTINGS (MANDATORY TO AVOID 403 ACCESS DENIED):
+ * 1. Open Google Sheets (https://sheets.new) OR https://script.google.com
+ * 2. Paste this entire code into "Code.gs".
+ * 3. Click Deploy > New deployment (or Manage deployments > Edit).
+ * 4. Select type: "Web app".
+ * 5. Set Description: "BPCL Earthing Sync Webhook".
+ * 6. Set Execute as: "Me" (your Google account).
+ * 7. Set Who has access: "Anyone"  <--- CRITICAL! (If set to "Only myself", external devices get 403 Access Denied)
+ * 8. Click "Deploy" and Authorize permissions ("Advanced" > "Go to BPCL Earthing Sync" > "Allow").
+ * 9. Copy the Web App URL (starts with https://script.google.com/macros/s/...)
+ *    and paste into the "Google Sync" menu in the app!
  */
 
+const SPREADSHEET_NAME = "BPCL_Earthing_Testing_Records";
 const SHEET_NAME = "Earthing_Inspections";
 const DRIVE_FOLDER_NAME = "BPCL_Earthing_Photos";
 
@@ -33,78 +34,98 @@ function doPost(e) {
       }
     }
 
-    // Health check ping
+    // 1. Health check ping
     if (data.action === "ping") {
       return ContentService.createTextOutput(JSON.stringify({
         status: "success",
-        message: "Pong! BPCL Earthing Testing webhook is live and operational."
+        message: "Pong! BPCL Earthing Testing webhook is live, authorized, and operational.",
+        timestamp: new Date().toISOString()
       })).setMimeType(ContentService.MimeType.JSON);
     }
     
-    // 1. Get or create Google Drive Folder
+    // 2. Get or create Google Drive Folder
     const folder = getOrCreateFolder(DRIVE_FOLDER_NAME);
     
-    // 2. Process and save any uploaded photos to Google Drive
+    // 3. Process and save any uploaded photos to Google Drive
     const photoUrls = {};
     if (data.photos && Array.isArray(data.photos)) {
       data.photos.forEach((item) => {
-        if (item.base64 && item.pit) {
+        const b64 = item.base64 || item.dataUrl || item.data || "";
+        const pitName = item.pit || "EP";
+        if (b64) {
           try {
-            const rawBase64 = item.base64.replace(/^data:image\/\w+;base64,/, "");
+            const rawBase64 = b64.replace(/^data:image\/\w+;base64,/, "");
             const bytes = Utilities.base64Decode(rawBase64);
-            const fileName = `${data.roid || 'RO'}_${item.pit}_${Utilities.formatDate(new Date(), "GMT+5:30", "yyyyMMdd_HHmmss")}.jpg`;
+            const fileName = `${data.roid || 'RO'}_${pitName}_${Utilities.formatDate(new Date(), "GMT+5:30", "yyyyMMdd_HHmmss")}.jpg`;
             const blob = Utilities.newBlob(bytes, "image/jpeg", fileName);
             const file = folder.createFile(blob);
-            file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-            photoUrls[item.pit] = file.getUrl();
+            try {
+              file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+            } catch(shareErr) {
+              // Safely bypass domain link-sharing restrictions
+            }
+            photoUrls[pitName] = file.getUrl();
           } catch (photoErr) {
-            Logger.log("Error saving photo: " + photoErr.toString());
+            Logger.log("Error saving photo for " + pitName + ": " + photoErr.toString());
           }
         }
       });
     }
     
-    // 3. Get or create the Google Sheet
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    // 4. Get or create the Google Sheet (Handles container-bound or standalone script)
+    const ss = getOrCreateSpreadsheet();
     let sheet = ss.getSheetByName(SHEET_NAME);
     if (!sheet) {
       sheet = ss.insertSheet(SHEET_NAME);
-      // Create Header Row
+      // Create Official BPCL Earthing Header Row
       const headers = [
         "Timestamp", "ROID", "Retail Outlet", "Sales Area", "EO Name", "MST Name",
-        "Test Date", "Next Due Date", "Contractor", "Instrument",
+        "Test Date", "Next Due Date", "Contractor", "Instrument Make & Serial",
         "EP-1 Value (Ω)", "EP-1 Status", "EP-1 Photo Link",
         "EP-2 Value (Ω)", "EP-2 Status", "EP-2 Photo Link",
         "EP-3 Value (Ω)", "EP-3 Status", "EP-3 Photo Link",
         "EP-4 Value (Ω)", "EP-4 Status", "EP-4 Photo Link",
         "EP-5 Value (Ω)", "EP-5 Status", "EP-5 Photo Link",
-        "Max Resistance (Ω)", "Overall Compliance", "Remarks"
+        "All Pits Summary", "Max Resistance (Ω)", "Overall Compliance", "Remarks"
       ];
       sheet.appendRow(headers);
       sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#0056b3").setFontColor("#ffffff");
       sheet.setFrozenRows(1);
     }
     
-    // 4. Map Pit Measurements
+    // 5. Map Pit Measurements
     const pits = data.pits || [];
     const pitMap = {};
     let maxResistance = 0;
     let hasHigh = false;
+    const summaryParts = [];
     
-    pits.forEach(p => {
-      const num = p.pitNumber || p.num || "EP";
+    pits.forEach((p, idx) => {
+      const num = p.pitNumber || p.num || ("EP-" + (idx + 1));
       const val = parseFloat(p.gridEarthValue !== undefined ? p.gridEarthValue : p.val) || 0;
       const status = val <= 2.0 ? "PASS" : "HIGH";
       if (val > 2.0) hasHigh = true;
       if (val > maxResistance) maxResistance = val;
-      pitMap[num] = { val: val, status: status, photo: photoUrls[num] || p.photoUrl || "" };
+      const pPhoto = photoUrls[num] || p.photoUrl || "";
+      pitMap[num] = { val: val, status: status, photo: pPhoto };
+      summaryParts.push(`${num}: ${val}Ω (${status})`);
     });
     
-    const ep1 = pitMap["EP-1"] || { val: "", status: "", photo: "" };
-    const ep2 = pitMap["EP-2"] || { val: "", status: "", photo: "" };
-    const ep3 = pitMap["EP-3"] || { val: "", status: "", photo: "" };
-    const ep4 = pitMap["EP-4"] || { val: "", status: "", photo: "" };
-    const ep5 = pitMap["EP-5"] || { val: "", status: "", photo: "" };
+    // Helper to find pit data flexibly by number
+    function getPit(epNum) {
+      if (pitMap[epNum]) return pitMap[epNum];
+      const digit = epNum.replace(/[^0-9]/g, '');
+      for (const k in pitMap) {
+        if (k.replace(/[^0-9]/g, '') === digit) return pitMap[k];
+      }
+      return { val: "", status: "", photo: "" };
+    }
+    
+    const ep1 = getPit("EP-1");
+    const ep2 = getPit("EP-2");
+    const ep3 = getPit("EP-3");
+    const ep4 = getPit("EP-4");
+    const ep5 = getPit("EP-5");
     
     const nowStr = Utilities.formatDate(new Date(), "GMT+5:30", "dd-MM-yyyy HH:mm:ss");
     
@@ -118,23 +139,24 @@ function doPost(e) {
       data.testDate || "",
       data.nextTestDate || "",
       data.contractorName || "CLR FACILITY SERVICES",
-      `${data.earthTesterMake || 'Waco'} (${data.earthTesterSerial || 'N/A'})`,
+      `${data.earthTesterMake || 'Waco'} (${data.earthTesterSerial || 'WC-354672'})`,
       ep1.val, ep1.status, ep1.photo,
       ep2.val, ep2.status, ep2.photo,
       ep3.val, ep3.status, ep3.photo,
       ep4.val, ep4.status, ep4.photo,
       ep5.val, ep5.status, ep5.photo,
+      summaryParts.join(" | "),
       maxResistance,
       hasHigh ? "ATTENTION REQUIRED (>2.0Ω)" : "ALL COMPLIANT (<=2.0Ω)",
       data.remarks || ""
     ];
     
-    // 5. Append Row to Sheet
+    // 6. Append Row to Sheet
     sheet.appendRow(row);
     
     return ContentService.createTextOutput(JSON.stringify({
       status: "success",
-      message: "Successfully updated Google Sheet and uploaded photos to Google Drive.",
+      message: "Successfully recorded in Google Sheet and uploaded photos to Google Drive.",
       timestamp: nowStr,
       station: data.siteName,
       drivePhotosUploaded: Object.keys(photoUrls).length,
@@ -142,6 +164,7 @@ function doPost(e) {
     })).setMimeType(ContentService.MimeType.JSON);
     
   } catch (error) {
+    Logger.log("Webhook Error: " + error.toString());
     return ContentService.createTextOutput(JSON.stringify({
       status: "error",
       message: error.toString()
@@ -153,8 +176,26 @@ function doGet(e) {
   return ContentService.createTextOutput(JSON.stringify({
     status: "active",
     service: "BPCL Earthing Testing Google Sync Webhook",
-    message: "Endpoint is ready to receive POST inspection updates."
+    message: "Endpoint is live, authorized, and operational!",
+    timestamp: new Date().toISOString()
   })).setMimeType(ContentService.MimeType.JSON);
+}
+
+function getOrCreateSpreadsheet() {
+  try {
+    const active = SpreadsheetApp.getActiveSpreadsheet();
+    if (active) return active;
+  } catch(e) {}
+
+  const files = DriveApp.getFilesByName(SPREADSHEET_NAME);
+  while (files.hasNext()) {
+    const f = files.next();
+    if (f.getMimeType() === MimeType.GOOGLE_SHEETS) {
+      return SpreadsheetApp.open(f);
+    }
+  }
+
+  return SpreadsheetApp.create(SPREADSHEET_NAME);
 }
 
 function getOrCreateFolder(folderName) {
