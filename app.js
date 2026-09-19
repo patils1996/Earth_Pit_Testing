@@ -209,15 +209,41 @@ class Store {
       this.serverAvailable = false;
     }
 
-    // 3. Fallback to bundled data/outlets.json for static GitHub Pages hosting
-    if (!this.reports || this.reports.length === 0) {
+    // 3. Sync from bundled data/outlets.json for static GitHub Pages hosting
+    if (!this.serverAvailable) {
       try {
-        const res = await fetch('./data/outlets.json');
+        const res = await fetch('./data/outlets.json?v=' + Date.now());
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data) && data.length > 0) {
-            this.reports = data;
-            try { localStorage.setItem('earth-pit-reports', JSON.stringify(this.reports)); } catch(e) {}
+            if (!this.reports || this.reports.length === 0) {
+              this.reports = data;
+              try { localStorage.setItem('earth-pit-reports', JSON.stringify(this.reports)); } catch(e) {}
+            } else {
+              const dataMap = new Map(data.map(r => [r.id, r]));
+              let hasNewer = false;
+              this.reports = this.reports.map(localR => {
+                const remoteR = dataMap.get(localR.id);
+                if (remoteR) {
+                  const remoteUpdated = remoteR.updatedAt || remoteR.testDate || '';
+                  const localUpdated = localR.updatedAt || localR.testDate || '';
+                  if (remoteUpdated > localUpdated) {
+                    hasNewer = true;
+                    return remoteR;
+                  }
+                }
+                return localR;
+              });
+              data.forEach(r => {
+                if (!this.reports.some(lr => lr.id === r.id)) {
+                  this.reports.push(r);
+                  hasNewer = true;
+                }
+              });
+              if (hasNewer) {
+                try { localStorage.setItem('earth-pit-reports', JSON.stringify(this.reports)); } catch(e) {}
+              }
+            }
           }
         }
       } catch (e) {

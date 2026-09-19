@@ -1,5 +1,5 @@
 // Service Worker for BPCL Earthing Testing App (By CLR FACILITY SERVICES)
-const CACHE_NAME = 'bpcl-earthing-v4.1';
+const CACHE_NAME = 'bpcl-earthing-v4.2';
 
 const STATIC_ASSETS = [
   './',
@@ -17,7 +17,7 @@ const STATIC_ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[SW] Pre-caching static assets for v3.0');
+      console.log('[SW] Pre-caching static assets for v4.2');
       return cache.addAll(STATIC_ASSETS).catch((err) => {
         console.warn('[SW] Cache addAll warning:', err);
       });
@@ -55,14 +55,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Network-First for HTML, JS, CSS, and navigation requests
+  // Network-First for HTML, JS, CSS, JSON data, and navigation requests
   const isCodeOrDoc = event.request.mode === 'navigate' ||
     event.request.destination === 'document' ||
     event.request.destination === 'script' ||
     event.request.destination === 'style' ||
     event.request.url.endsWith('.html') ||
     event.request.url.endsWith('.js') ||
-    event.request.url.endsWith('.css');
+    event.request.url.endsWith('.css') ||
+    event.request.url.includes('.json');
 
   if (isCodeOrDoc) {
     event.respondWith(
