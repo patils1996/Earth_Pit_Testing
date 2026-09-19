@@ -1,6 +1,6 @@
 /**
  * ====================================================================
- * BPCL EARTHING TESTING APP - GOOGLE APPS SCRIPT WEBHOOK (V3.8)
+ * BPCL EARTHING TESTING APP - GOOGLE APPS SCRIPT WEBHOOK (V4.0)
  * Automatically updates Google Sheet & uploads photos to Google Drive
  * Standard: IS 3043:2018 & OISD-STD-147
  * Contractor: CLR FACILITY SERVICES
@@ -11,7 +11,7 @@
  * 2. Paste this entire code into "Code.gs".
  * 3. Click Deploy > New deployment (or Manage deployments > Edit).
  * 4. Select type: "Web app".
- * 5. Set Description: "BPCL Earthing Sync Webhook".
+ * 5. Set Description: "BPCL Earthing Sync Webhook v4.0".
  * 6. Set Execute as: "Me" (your Google account).
  * 7. Set Who has access: "Anyone"  <--- CRITICAL! (If set to "Only myself", external devices get 403 Access Denied)
  * 8. Click "Deploy" and Authorize permissions ("Advanced" > "Go to BPCL Earthing Sync" > "Allow").
@@ -43,10 +43,16 @@ function doPost(e) {
       })).setMimeType(ContentService.MimeType.JSON);
     }
     
-    // 2. Get or create Google Drive Folder
-    const folder = getOrCreateFolder(DRIVE_FOLDER_NAME);
+    // 2. Get or create root Google Drive Folder
+    const rootFolder = getOrCreateFolder(DRIVE_FOLDER_NAME);
     
-    // 3. Process and save any uploaded photos to Google Drive
+    // 3. Get or create Station Subfolder named "[RO code] - [RO name]"
+    const roCode = (data.retailCode || data.roid || "RO").toString().trim();
+    const roName = (data.siteName || "Retail Outlet").toString().trim();
+    const subfolderName = `${roCode} - ${roName}`;
+    const stationFolder = getOrCreateSubfolder(rootFolder, subfolderName);
+
+    // 4. Process and save any uploaded photos into Station Subfolder
     const photoUrls = {};
     if (data.photos && Array.isArray(data.photos)) {
       data.photos.forEach((item) => {
@@ -56,9 +62,9 @@ function doPost(e) {
           try {
             const rawBase64 = b64.replace(/^data:image\/\w+;base64,/, "");
             const bytes = Utilities.base64Decode(rawBase64);
-            const fileName = `${data.roid || 'RO'}_${pitName}_${Utilities.formatDate(new Date(), "GMT+5:30", "yyyyMMdd_HHmmss")}.jpg`;
+            const fileName = `${roCode}_${pitName}_${Utilities.formatDate(new Date(), "GMT+5:30", "yyyyMMdd_HHmmss")}.jpg`;
             const blob = Utilities.newBlob(bytes, "image/jpeg", fileName);
-            const file = folder.createFile(blob);
+            const file = stationFolder.createFile(blob);
             try {
               file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
             } catch(shareErr) {
@@ -72,28 +78,43 @@ function doPost(e) {
       });
     }
     
-    // 4. Get or create the Google Sheet (Handles container-bound or standalone script)
+    // 5. Get or create the Google Sheet (Handles container-bound or standalone script)
     const ss = getOrCreateSpreadsheet();
     let sheet = ss.getSheetByName(SHEET_NAME);
+    const headers = [
+      "Timestamp", "ROID", "Retail Outlet", "Sales Area", "EO Name", "MST Name",
+      "Test Date", "Next Due Date", "Contractor", "Instrument Make & Serial",
+      "EP-1 Value (Ω)", "EP-1 Status", "EP-1 Photo Link",
+      "EP-2 Value (Ω)", "EP-2 Status", "EP-2 Photo Link",
+      "EP-3 Value (Ω)", "EP-3 Status", "EP-3 Photo Link",
+      "EP-4 Value (Ω)", "EP-4 Status", "EP-4 Photo Link",
+      "EP-5 Value (Ω)", "EP-5 Status", "EP-5 Photo Link",
+      "All Pits Summary", "Max Resistance (Ω)", "Overall Compliance", "Drive Station Folder", "Remarks"
+    ];
+
     if (!sheet) {
       sheet = ss.insertSheet(SHEET_NAME);
-      // Create Official BPCL Earthing Header Row
-      const headers = [
-        "Timestamp", "ROID", "Retail Outlet", "Sales Area", "EO Name", "MST Name",
-        "Test Date", "Next Due Date", "Contractor", "Instrument Make & Serial",
-        "EP-1 Value (Ω)", "EP-1 Status", "EP-1 Photo Link",
-        "EP-2 Value (Ω)", "EP-2 Status", "EP-2 Photo Link",
-        "EP-3 Value (Ω)", "EP-3 Status", "EP-3 Photo Link",
-        "EP-4 Value (Ω)", "EP-4 Status", "EP-4 Photo Link",
-        "EP-5 Value (Ω)", "EP-5 Status", "EP-5 Photo Link",
-        "All Pits Summary", "Max Resistance (Ω)", "Overall Compliance", "Remarks"
-      ];
       sheet.appendRow(headers);
       sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#0056b3").setFontColor("#ffffff");
       sheet.setFrozenRows(1);
+    } else {
+      // Check if existing sheet headers need "Drive Station Folder" column
+      const lastCol = sheet.getLastColumn();
+      if (lastCol > 0) {
+        const headerValues = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        if (!headerValues.includes("Drive Station Folder")) {
+          const remIdx = headerValues.indexOf("Remarks");
+          if (remIdx !== -1) {
+            sheet.insertColumnBefore(remIdx + 1);
+            sheet.getRange(1, remIdx + 1).setValue("Drive Station Folder").setFontWeight("bold").setBackground("#0056b3").setFontColor("#ffffff");
+          } else {
+            sheet.getRange(1, lastCol + 1).setValue("Drive Station Folder").setFontWeight("bold").setBackground("#0056b3").setFontColor("#ffffff");
+          }
+        }
+      }
     }
     
-    // 5. Map Pit Measurements
+    // 6. Map Pit Measurements
     const pits = data.pits || [];
     const pitMap = {};
     let maxResistance = 0;
@@ -131,8 +152,8 @@ function doPost(e) {
     
     const row = [
       nowStr,
-      data.retailCode || data.roid || "",
-      data.siteName || "",
+      roCode,
+      roName,
       data.salesArea || "",
       data.eoName || "",
       data.mstName || "",
@@ -148,17 +169,20 @@ function doPost(e) {
       summaryParts.join(" | "),
       maxResistance,
       hasHigh ? "ATTENTION REQUIRED (>2.0Ω)" : "ALL COMPLIANT (<=2.0Ω)",
+      stationFolder.getUrl(),
       data.remarks || ""
     ];
     
-    // 6. Append Row to Sheet
+    // 7. Append Row to Sheet
     sheet.appendRow(row);
     
     return ContentService.createTextOutput(JSON.stringify({
       status: "success",
-      message: "Successfully recorded in Google Sheet and uploaded photos to Google Drive.",
+      message: "Successfully recorded in Google Sheet and uploaded photos to Google Drive station subfolder.",
       timestamp: nowStr,
-      station: data.siteName,
+      station: roName,
+      folderName: subfolderName,
+      folderUrl: stationFolder.getUrl(),
       drivePhotosUploaded: Object.keys(photoUrls).length,
       photoUrls: photoUrls
     })).setMimeType(ContentService.MimeType.JSON);
@@ -204,4 +228,16 @@ function getOrCreateFolder(folderName) {
     return folders.next();
   }
   return DriveApp.createFolder(folderName);
+}
+
+function getOrCreateSubfolder(parentFolder, subfolderName) {
+  const folders = parentFolder.getFoldersByName(subfolderName);
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+  const newFolder = parentFolder.createFolder(subfolderName);
+  try {
+    newFolder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch(e) {}
+  return newFolder;
 }

@@ -6,6 +6,7 @@ import os
 import mimetypes
 import uuid
 import datetime
+import calendar
 from urllib.parse import urlparse, parse_qs
 
 PORT = 5000
@@ -117,18 +118,17 @@ def save_report(data, report_id=None):
         report_id = data.get('id') or f"rep-{uuid.uuid4().hex[:6]}"
     
     test_date = data.get('testDate') or datetime.date.today().isoformat()
-    next_test_date = data.get('nextTestDate')
-    if not next_test_date and test_date:
-        try:
-            d = datetime.date.fromisoformat(test_date)
-            month = d.month + 6
-            year = d.year
-            if month > 12:
-                month -= 12
-                year += 1
-            next_test_date = datetime.date(year, month, min(d.day, 28)).isoformat()
-        except Exception:
-            next_test_date = test_date
+    try:
+        d = datetime.date.fromisoformat(test_date.split('T')[0])
+        month = d.month + 6
+        year = d.year
+        if month > 12:
+            year += (month - 1) // 12
+            month = ((month - 1) % 12) + 1
+        max_d = calendar.monthrange(year, month)[1]
+        next_test_date = datetime.date(year, month, min(d.day, max_d)).isoformat()
+    except Exception:
+        next_test_date = data.get('nextTestDate') or test_date
 
     c.execute("""
         INSERT OR REPLACE INTO reports (

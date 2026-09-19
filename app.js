@@ -54,6 +54,37 @@ function hidePwaInstallModal() {
   sessionStorage.setItem('pwa_prompt_dismissed', 'true');
 }
 
+// Helper to calculate exact next test date strictly 6 months later
+function calculateNextTestDate(testDateStr) {
+  if (!testDateStr) return '';
+  try {
+    const cleanStr = String(testDateStr).trim().split('T')[0];
+    const parts = cleanStr.split('-');
+    if (parts.length === 3) {
+      let year = parseInt(parts[0], 10);
+      let month = parseInt(parts[1], 10);
+      let day = parseInt(parts[2], 10);
+      if (isNaN(year) || isNaN(month) || isNaN(day)) return '';
+
+      month += 6;
+      if (month > 12) {
+        year += Math.floor((month - 1) / 12);
+        month = ((month - 1) % 12) + 1;
+      }
+      // Clamping to last day of target month (e.g. Aug 31 -> Feb 28)
+      const maxDays = new Date(year, month, 0).getDate();
+      if (day > maxDays) day = maxDays;
+
+      const mm = String(month).padStart(2, '0');
+      const dd = String(day).padStart(2, '0');
+      return `${year}-${mm}-${dd}`;
+    }
+  } catch (e) {
+    console.warn('Error calculating next test date:', e);
+  }
+  return '';
+}
+
 // ==========================================
 // 2. STORE & DATA REPOSITORY
 // ==========================================
@@ -130,10 +161,8 @@ class Store {
       reportData.id = 'ro-' + (reportData.retailCode || Math.random().toString(36).substr(2, 6));
     }
 
-    if (!reportData.nextTestDate && reportData.testDate) {
-      const dt = new Date(reportData.testDate);
-      dt.setMonth(dt.getMonth() + 6);
-      reportData.nextTestDate = dt.toISOString().split('T')[0];
+    if (reportData.testDate) {
+      reportData.nextTestDate = calculateNextTestDate(reportData.testDate);
     }
 
     if (this.serverAvailable) {
@@ -349,13 +378,14 @@ async function pushToGoogle(reportData, photosArray = []) {
       throw new Error(resData.message || "Google Apps Script internal execution error");
     }
 
+    const folderInfo = resData && resData.folderName ? ` in "${resData.folderName}"` : '';
     logEntry.status = 'Synced to Google';
-    logEntry.details = `Pushed row to Google Sheet & uploaded ${photosArray.length} photo(s) to Google Drive.`;
+    logEntry.details = `Pushed row to Google Sheet & saved ${photosArray.length} photo(s) to Drive${folderInfo}.`;
     addSyncLog(logEntry);
 
     showToast({
       title: "Google Sync Complete",
-      description: `Google Sheet updated and photos pushed to Google Drive for ${reportData.siteName}.`,
+      description: `Google Sheet updated and photos saved in Drive folder (${resData?.folderName || reportData.siteName}).`,
       variant: "success"
     });
   } catch (err) {
@@ -823,9 +853,11 @@ function renderUpdateTestView() {
         return;
       }
 
+      const today = new Date().toISOString().split('T')[0];
       const payload = {
         ...mstSelectedReport,
-        testDate: new Date().toISOString().split('T')[0],
+        testDate: today,
+        nextTestDate: calculateNextTestDate(today),
         pits: mstPitsData.map((p, idx) => ({
           id: `${mstSelectedReport.id}-p${idx+1}`,
           pitNumber: p.pitNumber,
@@ -2385,14 +2417,14 @@ function renderReportForm(reportId = null) {
   const isEdit = Boolean(reportId);
   const existing = isEdit ? store.getReport(reportId) : null;
 
-  const defaultValues = existing || {
+  const defaultValues = existing ? { ...existing } : {
     siteName: "",
     retailCode: "",
     salesArea: "Desur Retail",
     eoName: "Vasa Nagamallik",
     mstName: "Sanjay Korvi",
     testDate: new Date().toISOString().split('T')[0],
-    nextTestDate: (() => { const d = new Date(); d.setMonth(d.getMonth() + 6); return d.toISOString().split('T')[0]; })(),
+    nextTestDate: calculateNextTestDate(new Date().toISOString().split('T')[0]),
     contractorName: "CLR FACILITY SERVICES",
     earthTesterMake: "Waco",
     earthTesterModel: "Digital Earth Tester",
@@ -2405,6 +2437,11 @@ function renderReportForm(reportId = null) {
       { pitNumber: "EP-5", location: "Electrical Room", equipmentConnected: "Main LT Panel Body", gridEarthValue: 2.2, remarks: "Needs Watering" }
     ]
   };
+
+  // Strictly ensure nextTestDate is 6 months from testDate
+  if (defaultValues.testDate) {
+    defaultValues.nextTestDate = calculateNextTestDate(defaultValues.testDate);
+  }
 
   const pitsData = existing && existing.pits && existing.pits.length > 0 ? existing.pits : defaultValues.pits;
 
@@ -2513,13 +2550,16 @@ function renderReportForm(reportId = null) {
               />
             </div>
             <div class="space-y-1.5">
-              <label class="text-xs font-semibold text-slate-700">Next Retest Date (+6M)</label>
+              <div class="flex items-center justify-between">
+                <label class="text-xs font-semibold text-slate-700">Next Retest Date (+6M)</label>
+                <span class="text-[10px] text-blue-600 font-medium">Auto 6-Month Cycle</span>
+              </div>
               <input
                 type="date"
                 id="nextTestDate"
                 name="nextTestDate"
                 value="${defaultValues.nextTestDate || ''}"
-                class="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-slate-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 focus:outline-none transition"
+                class="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-slate-900 bg-slate-50 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 focus:outline-none transition"
               />
             </div>
           </div>
@@ -2695,15 +2735,13 @@ function renderReportForm(reportId = null) {
   const testDateEl = document.getElementById('testDate');
   const nextTestDateEl = document.getElementById('nextTestDate');
   if (testDateEl && nextTestDateEl) {
-    testDateEl.addEventListener('change', (e) => {
-      if (e.target.value) {
-        try {
-          const d = new Date(e.target.value);
-          d.setMonth(d.getMonth() + 6);
-          nextTestDateEl.value = d.toISOString().split('T')[0];
-        } catch(err) {}
+    const updateNextRetestDate = () => {
+      if (testDateEl.value) {
+        nextTestDateEl.value = calculateNextTestDate(testDateEl.value);
       }
-    });
+    };
+    testDateEl.addEventListener('input', updateNextRetestDate);
+    testDateEl.addEventListener('change', updateNextRetestDate);
   }
 
 
@@ -2852,7 +2890,7 @@ function renderReportForm(reportId = null) {
       eoName: document.getElementById('eoName').value.trim(),
       mstName: document.getElementById('mstName').value.trim(),
       testDate: document.getElementById('testDate').value,
-      nextTestDate: document.getElementById('nextTestDate').value,
+      nextTestDate: calculateNextTestDate(document.getElementById('testDate').value) || document.getElementById('nextTestDate').value,
       contractorName: document.getElementById('contractorName').value.trim() || "CLR FACILITY SERVICES",
       earthTesterMake: document.getElementById('earthTesterMake').value.trim() || "Waco",
       earthTesterModel: document.getElementById('earthTesterModel').value.trim() || "Digital Earth Tester",
@@ -2929,7 +2967,7 @@ function handleExcelUpload(file) {
           eoName: eo,
           mstName: mst,
           testDate: new Date().toISOString().split('T')[0],
-          nextTestDate: (() => { const d = new Date(); d.setMonth(d.getMonth() + 6); return d.toISOString().split('T')[0]; })(),
+          nextTestDate: calculateNextTestDate(new Date().toISOString().split('T')[0]),
           contractorName: "CLR FACILITY SERVICES",
           earthTesterMake: "Waco",
           earthTesterSerial: "WC-354672",
