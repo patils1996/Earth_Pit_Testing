@@ -83,7 +83,7 @@ function doPost(e) {
     let sheet = ss.getSheetByName(SHEET_NAME);
     const headers = [
       "Timestamp", "ROID", "Retail Outlet", "Sales Area", "EO Name", "MST Name",
-      "Test Date", "Next Due Date", "Contractor", "Instrument Make & Serial",
+      "Test Date", "Next Due Date", "Retest Status", "Action to be Taken", "Contractor", "Instrument Make & Serial",
       "EP-1 Value (Ω)", "EP-1 Status", "EP-1 Photo Link",
       "EP-2 Value (Ω)", "EP-2 Status", "EP-2 Photo Link",
       "EP-3 Value (Ω)", "EP-3 Status", "EP-3 Photo Link",
@@ -98,10 +98,18 @@ function doPost(e) {
       sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#0056b3").setFontColor("#ffffff");
       sheet.setFrozenRows(1);
     } else {
-      // Check if existing sheet headers need "Drive Station Folder" column
+      // Dynamic header column upgrade for existing sheets
       const lastCol = sheet.getLastColumn();
       if (lastCol > 0) {
         const headerValues = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        if (!headerValues.includes("Retest Status")) {
+          const nextDueIdx = headerValues.indexOf("Next Due Date");
+          if (nextDueIdx !== -1) {
+            sheet.insertColumnsAfter(nextDueIdx + 1, 2);
+            sheet.getRange(1, nextDueIdx + 2).setValue("Retest Status").setFontWeight("bold").setBackground("#0056b3").setFontColor("#ffffff");
+            sheet.getRange(1, nextDueIdx + 3).setValue("Action to be Taken").setFontWeight("bold").setBackground("#0056b3").setFontColor("#ffffff");
+          }
+        }
         if (!headerValues.includes("Drive Station Folder")) {
           const remIdx = headerValues.indexOf("Remarks");
           if (remIdx !== -1) {
@@ -149,6 +157,35 @@ function doPost(e) {
     const ep5 = getPit("EP-5");
     
     const nowStr = Utilities.formatDate(new Date(), "GMT+5:30", "dd-MM-yyyy HH:mm:ss");
+
+    // Retest status & Action to be taken calculation
+    let retestStatus = data.retestStatus || "VALID";
+    let actionToBeTaken = data.actionToBeTaken || (hasHigh ? "Watering & Treatment Required" : "All Compliant");
+    if (!data.retestStatus && data.nextTestDate) {
+      try {
+        const parts = data.nextTestDate.split('-');
+        if (parts.length === 3) {
+          const nDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+          const curDate = new Date();
+          curDate.setHours(0, 0, 0, 0);
+          nDate.setHours(0, 0, 0, 0);
+          const diffDays = Math.ceil((nDate.getTime() - curDate.getTime()) / (1000 * 60 * 60 * 24));
+          if (diffDays < 0) {
+            retestStatus = `OVERDUE (${Math.abs(diffDays)}d)`;
+            actionToBeTaken = hasHigh ? "CRITICAL: Retest & Watering Required" : "RETEST DUE: Schedule MST Inspection";
+          } else if (diffDays === 0) {
+            retestStatus = "DUE TODAY";
+            actionToBeTaken = "RETEST DUE: Schedule MST Inspection";
+          } else if (diffDays <= 30) {
+            retestStatus = `UPCOMING RETEST (${diffDays}d)`;
+            actionToBeTaken = hasHigh ? "HIGH: Watering Needed (>2.0Ω)" : "UPCOMING: Plan Visit";
+          } else {
+            retestStatus = `VALID (${diffDays}d)`;
+            actionToBeTaken = hasHigh ? "HIGH: Watering Needed (>2.0Ω)" : "ALL COMPLIANT: Certified Valid";
+          }
+        }
+      } catch(e) {}
+    }
     
     const row = [
       nowStr,
@@ -159,6 +196,8 @@ function doPost(e) {
       data.mstName || "",
       data.testDate || "",
       data.nextTestDate || "",
+      retestStatus,
+      actionToBeTaken,
       data.contractorName || "CLR FACILITY SERVICES",
       `${data.earthTesterMake || 'Waco'} (${data.earthTesterSerial || 'WC-354672'})`,
       ep1.val, ep1.status, ep1.photo,

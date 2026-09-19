@@ -85,6 +85,97 @@ function calculateNextTestDate(testDateStr) {
   return '';
 }
 
+// Retest & Action Helpers
+function isSiteDue(report) {
+  if (!report) return false;
+  if (!report.nextTestDate) return true;
+  const todayStr = new Date().toISOString().split('T')[0];
+  return report.nextTestDate <= todayStr;
+}
+
+function isSiteUpcoming(report, days = 30) {
+  if (!report || !report.nextTestDate) return false;
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const target = new Date(today.getTime() + days * 24 * 60 * 60 * 1000);
+    const d = new Date(report.nextTestDate);
+    d.setHours(0, 0, 0, 0);
+    return d > today && d <= target;
+  } catch(e) {
+    return false;
+  }
+}
+
+function getRetestStatus(report) {
+  if (!report || !report.nextTestDate) {
+    return { status: "Due", label: "Retest Due", badgeClass: "bg-rose-100 text-rose-800 border-rose-200", days: 0, isOverdue: true };
+  }
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const d = new Date(report.nextTestDate);
+    d.setHours(0, 0, 0, 0);
+    const diffDays = Math.ceil((d.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (diffDays < 0) {
+      return { status: "Due", label: `Overdue by ${Math.abs(diffDays)}d`, badgeClass: "bg-rose-100 text-rose-800 border-rose-200", days: diffDays, isOverdue: true };
+    } else if (diffDays === 0) {
+      return { status: "Due", label: "Due Today", badgeClass: "bg-rose-100 text-rose-800 border-rose-200", days: 0, isOverdue: true };
+    } else if (diffDays <= 30) {
+      return { status: "Upcoming", label: `Due in ${diffDays}d`, badgeClass: "bg-amber-100 text-amber-800 border-amber-200", days: diffDays, isUpcoming: true };
+    } else {
+      return { status: "Valid", label: `Due in ${diffDays}d`, badgeClass: "bg-emerald-50 text-emerald-700 border-emerald-200", days: diffDays, isValid: true };
+    }
+  } catch(e) {
+    return { status: "Due", label: "Retest Due", badgeClass: "bg-rose-100 text-rose-800 border-rose-200", days: 0, isOverdue: true };
+  }
+}
+
+function getActionToBeTaken(report) {
+  if (!report) return { priority: "OK", action: "No Action Needed", desc: "Inspection compliant", badge: "bg-emerald-100 text-emerald-800" };
+  const pits = report.pits || [];
+  const hasHigh = pits.some(p => Number(p.gridEarthValue) > 2.0);
+  const retest = getRetestStatus(report);
+
+  if (hasHigh && retest.isOverdue) {
+    return {
+      priority: "CRITICAL",
+      action: "Retest & Watering Required",
+      desc: "Pits >2.0Ω and 6-month statutory retest overdue",
+      badge: "bg-rose-600 text-white"
+    };
+  } else if (hasHigh) {
+    return {
+      priority: "HIGH",
+      action: "Watering & Treatment Required",
+      desc: "Earth pits exceed 2.0Ω statutory threshold",
+      badge: "bg-orange-500 text-white"
+    };
+  } else if (retest.isOverdue) {
+    return {
+      priority: "MEDIUM",
+      action: "Periodic Retest Due",
+      desc: "6-month inspection cycle elapsed",
+      badge: "bg-purple-600 text-white"
+    };
+  } else if (retest.isUpcoming) {
+    return {
+      priority: "LOW",
+      action: "Upcoming Retest (Plan Visit)",
+      desc: `Due within ${retest.days} days`,
+      badge: "bg-indigo-600 text-white"
+    };
+  } else {
+    return {
+      priority: "OK",
+      action: "Compliant & Valid",
+      desc: "All pits ≤2.0Ω, certification active",
+      badge: "bg-emerald-600 text-white"
+    };
+  }
+}
+
 // ==========================================
 // 2. STORE & DATA REPOSITORY
 // ==========================================
@@ -298,6 +389,9 @@ function updatePendingBadge() {
 async function pushToGoogle(reportData, photosArray = []) {
   const webhookUrl = getGoogleWebhookUrl();
 
+  const retestInfo = getRetestStatus(reportData);
+  const actionInfo = getActionToBeTaken(reportData);
+
   const payload = {
     action: "update_test",
     timestamp: new Date().toISOString(),
@@ -308,6 +402,8 @@ async function pushToGoogle(reportData, photosArray = []) {
     mstName: reportData.mstName,
     testDate: reportData.testDate,
     nextTestDate: reportData.nextTestDate,
+    retestStatus: retestInfo.label,
+    actionToBeTaken: actionInfo.action,
     contractorName: reportData.contractorName || "CLR FACILITY SERVICES",
     earthTesterMake: reportData.earthTesterMake || "Waco",
     earthTesterSerial: reportData.earthTesterSerial || "WC-354672",
@@ -566,6 +662,40 @@ function escapeHtml(str) {
 
 let chartInstances = {};
 let dashboardFilters = { salesArea: 'all', eoName: 'all', mstName: 'all' };
+let dashboardActiveCard = 'due'; // Default to 'due' so Test Due Sites are immediately visible!
+let dashboardTableSearch = '';
+let dashboardTablePage = 1;
+let dashboardTablePageSize = 10;
+
+window.setDashboardFilter = function(cardKey) {
+  dashboardActiveCard = cardKey;
+  dashboardTablePage = 1;
+  dashboardTableSearch = '';
+  renderDashboard();
+  setTimeout(() => {
+    const tableEl = document.getElementById('dashboard-action-table');
+    if (tableEl) {
+      tableEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, 80);
+};
+
+window.setDashboardTablePage = function(page) {
+  dashboardTablePage = page;
+  renderDashboard();
+  setTimeout(() => {
+    const tableEl = document.getElementById('dashboard-action-table');
+    if (tableEl) {
+      tableEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, 50);
+};
+
+window.clearDashboardTableSearch = function() {
+  dashboardTableSearch = '';
+  dashboardTablePage = 1;
+  renderDashboard();
+};
 
 // ==========================================
 // 5. VIEW 1: UPDATE TEST (MST) (#/update-test)
@@ -1015,14 +1145,13 @@ function renderDashboard() {
   const highPits = outOfRangePits;
 
   const attentionStations = filteredReports.filter(r => (r.pits || []).some(p => Number(p.gridEarthValue) > 2.0));
+  const compliantStations = filteredReports.filter(r => !(r.pits || []).some(p => Number(p.gridEarthValue) > 2.0));
 
-  const now = new Date();
-  const thirtyDays = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-  const upcomingRetests = filteredReports.filter(r => {
-    if (!r.nextTestDate) return false;
-    const d = new Date(r.nextTestDate);
-    return d >= now && d <= thirtyDays;
-  });
+  // Test Due Sites (Overdue or Due Today)
+  const dueSites = filteredReports.filter(isSiteDue);
+
+  // Upcoming Retests (within next 30 days)
+  const upcomingRetests = filteredReports.filter(r => isSiteUpcoming(r, 30));
 
   const salesAreaStats = salesAreas.map(sa => {
     const saReports = allReports.filter(r => r.salesArea === sa);
@@ -1032,6 +1161,70 @@ function renderDashboard() {
     const rate = saPits.length > 0 ? Math.round((saCompliant / saPits.length) * 100) : 100;
     return { name: sa.replace('-retail', '').replace(' Retail', ''), compliant: saCompliant, high: saHigh, rate: rate };
   });
+
+  // Active Category configuration for the Actionable Sites Table
+  let activeCategoryTitle = "Test Due Sites";
+  let activeCategorySubtitle = "Statutory 6-Month testing cycle elapsed (Action: Schedule Testing)";
+  let activeCategoryIcon = "clock";
+  let activeCategoryColor = "text-red-600";
+  let activeCategoryBadge = "bg-red-100 text-red-800 border-red-200";
+  let targetSitesList = dueSites;
+
+  if (dashboardActiveCard === 'upcoming') {
+    activeCategoryTitle = "Upcoming Retests";
+    activeCategorySubtitle = "Testing due within the next 30 days (Action: Plan Inspection Visit)";
+    activeCategoryIcon = "calendar";
+    activeCategoryColor = "text-indigo-600";
+    activeCategoryBadge = "bg-indigo-100 text-indigo-800 border-indigo-200";
+    targetSitesList = upcomingRetests;
+  } else if (dashboardActiveCard === 'action_required') {
+    activeCategoryTitle = "Action Required (High Resistance)";
+    activeCategorySubtitle = "Stations with measured resistance exceeding 2.0 Ω (Action: Watering & Chemical Treatment)";
+    activeCategoryIcon = "wrench";
+    activeCategoryColor = "text-rose-600";
+    activeCategoryBadge = "bg-rose-100 text-rose-800 border-rose-200";
+    targetSitesList = attentionStations;
+  } else if (dashboardActiveCard === 'high_pits') {
+    activeCategoryTitle = "Outlets with High Resistance Earth Pits";
+    activeCategorySubtitle = "Stations with one or more grounding electrodes exceeding 2.0 Ω threshold";
+    activeCategoryIcon = "alert-triangle";
+    activeCategoryColor = "text-orange-600";
+    activeCategoryBadge = "bg-orange-100 text-orange-800 border-orange-200";
+    targetSitesList = attentionStations;
+  } else if (dashboardActiveCard === 'compliant') {
+    activeCategoryTitle = "Fully Compliant Retail Outlets";
+    activeCategorySubtitle = "All earth pits meeting IS 3043:2018 standard (≤ 2.0 Ω)";
+    activeCategoryIcon = "shield-check";
+    activeCategoryColor = "text-emerald-600";
+    activeCategoryBadge = "bg-emerald-100 text-emerald-800 border-emerald-200";
+    targetSitesList = compliantStations;
+  } else if (dashboardActiveCard === 'all') {
+    activeCategoryTitle = "All Retail Outlets";
+    activeCategorySubtitle = "Complete territory network directory across all sales areas";
+    activeCategoryIcon = "store";
+    activeCategoryColor = "text-blue-600";
+    activeCategoryBadge = "bg-blue-100 text-blue-800 border-blue-200";
+    targetSitesList = filteredReports;
+  }
+
+  // Filter with dashboard search term if any
+  const sTerm = (dashboardTableSearch || '').toLowerCase().trim();
+  const searchMatchedSites = targetSitesList.filter(r => {
+    if (!sTerm) return true;
+    return (
+      (r.siteName || '').toLowerCase().includes(sTerm) ||
+      String(r.retailCode || '').toLowerCase().includes(sTerm) ||
+      (r.salesArea || '').toLowerCase().includes(sTerm) ||
+      (r.eoName || '').toLowerCase().includes(sTerm) ||
+      (r.mstName || '').toLowerCase().includes(sTerm)
+    );
+  });
+
+  const totalCardSites = searchMatchedSites.length;
+  const cardPages = Math.ceil(totalCardSites / dashboardTablePageSize) || 1;
+  if (dashboardTablePage > cardPages) dashboardTablePage = cardPages;
+  const cardStartIdx = (dashboardTablePage - 1) * dashboardTablePageSize;
+  const cardPageItems = searchMatchedSites.slice(cardStartIdx, cardStartIdx + dashboardTablePageSize);
 
   const html = `
     <div class="space-y-6 fade-in">
@@ -1092,51 +1285,84 @@ function renderDashboard() {
         ` : ''}
       </div>
 
-      <!-- 5 Summary Cards -->
-      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <div class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-blue-600 shadow-sm">
+      <!-- 6 Summary Cards (Clickable to show matching sites below) -->
+      <div class="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+        <!-- Card 1: Retail Outlets -->
+        <div onclick="setDashboardFilter('all')" class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-blue-600 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer select-none group ${dashboardActiveCard === 'all' ? 'ring-2 ring-blue-500 ring-offset-2 bg-blue-50/20' : ''}">
           <div class="flex items-center justify-between pb-1">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Retail Outlets</span>
             <i data-lucide="store" class="h-4 w-4 text-blue-600"></i>
           </div>
           <div class="text-2xl font-bold font-display text-slate-900">${totalSites}</div>
-          <p class="text-[11px] text-slate-400 mt-1">${totalPits} tracked earth pits</p>
+          <div class="flex items-center justify-between mt-1 text-[11px]">
+            <span class="text-slate-400">${totalPits} pits</span>
+            <span class="text-blue-600 font-medium opacity-80 group-hover:opacity-100">${dashboardActiveCard === 'all' ? '● Active' : 'View →'}</span>
+          </div>
         </div>
 
-        <div class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-emerald-500 shadow-sm">
+        <!-- Card 2: Compliance Rate -->
+        <div onclick="setDashboardFilter('compliant')" class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-emerald-500 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer select-none group ${dashboardActiveCard === 'compliant' ? 'ring-2 ring-emerald-500 ring-offset-2 bg-emerald-50/20' : ''}">
           <div class="flex items-center justify-between pb-1">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Compliance Rate</span>
             <i data-lucide="shield-check" class="h-4 w-4 text-emerald-600"></i>
           </div>
           <div class="text-2xl font-bold font-display text-emerald-600">${complianceRate}%</div>
-          <p class="text-[11px] text-slate-400 mt-1">${compliantPits} pits &le; 2.0 &Omega;</p>
+          <div class="flex items-center justify-between mt-1 text-[11px]">
+            <span class="text-slate-400">${compliantPits} pits &le; 2.0&Omega;</span>
+            <span class="text-emerald-600 font-medium opacity-80 group-hover:opacity-100">${dashboardActiveCard === 'compliant' ? '● Active' : 'View →'}</span>
+          </div>
         </div>
 
-        <div class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-orange-500 shadow-sm">
+        <!-- Card 3: Pits Out of Range -->
+        <div onclick="setDashboardFilter('high_pits')" class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-orange-500 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer select-none group ${dashboardActiveCard === 'high_pits' ? 'ring-2 ring-orange-500 ring-offset-2 bg-orange-50/20' : ''}">
           <div class="flex items-center justify-between pb-1">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Pits Out of Range</span>
             <i data-lucide="alert-triangle" class="h-4 w-4 text-orange-500"></i>
           </div>
           <div class="text-2xl font-bold font-display text-orange-600">${outOfRangePits}</div>
-          <p class="text-[11px] text-slate-400 mt-1">Resistance &gt; 2.0 &Omega; (High)</p>
+          <div class="flex items-center justify-between mt-1 text-[11px]">
+            <span class="text-slate-400">&gt; 2.0&Omega; (High)</span>
+            <span class="text-orange-600 font-medium opacity-80 group-hover:opacity-100">${dashboardActiveCard === 'high_pits' ? '● Active' : 'View →'}</span>
+          </div>
         </div>
 
-        <div class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-rose-500 shadow-sm">
+        <!-- Card 4: Action Required -->
+        <div onclick="setDashboardFilter('action_required')" class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-rose-500 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer select-none group ${dashboardActiveCard === 'action_required' ? 'ring-2 ring-rose-500 ring-offset-2 bg-rose-50/20' : ''}">
           <div class="flex items-center justify-between pb-1">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Action Required</span>
             <i data-lucide="wrench" class="h-4 w-4 text-rose-500"></i>
           </div>
           <div class="text-2xl font-bold font-display text-rose-600">${attentionStations.length}</div>
-          <p class="text-[11px] text-slate-400 mt-1">Outlets needing watering</p>
+          <div class="flex items-center justify-between mt-1 text-[11px]">
+            <span class="text-slate-400">Needs watering</span>
+            <span class="text-rose-600 font-medium opacity-80 group-hover:opacity-100">${dashboardActiveCard === 'action_required' ? '● Active' : 'View →'}</span>
+          </div>
         </div>
 
-        <div class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-indigo-500 shadow-sm">
+        <!-- Card 5: Test Due Sites (NEW!) -->
+        <div onclick="setDashboardFilter('due')" class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-red-600 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer select-none group ${dashboardActiveCard === 'due' ? 'ring-2 ring-red-600 ring-offset-2 bg-red-50/20' : ''}">
+          <div class="flex items-center justify-between pb-1">
+            <span class="text-[11px] font-bold uppercase tracking-wider text-red-600">Test Due Sites</span>
+            <i data-lucide="clock" class="h-4 w-4 text-red-600"></i>
+          </div>
+          <div class="text-2xl font-bold font-display text-red-600">${dueSites.length}</div>
+          <div class="flex items-center justify-between mt-1 text-[11px]">
+            <span class="text-slate-400">Retest expired (&le; today)</span>
+            <span class="text-red-600 font-bold opacity-90 group-hover:opacity-100">${dashboardActiveCard === 'due' ? '● Active' : 'View →'}</span>
+          </div>
+        </div>
+
+        <!-- Card 6: Upcoming Retests -->
+        <div onclick="setDashboardFilter('upcoming')" class="bg-white rounded-xl p-4 border border-slate-200 border-l-4 border-l-indigo-500 shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all cursor-pointer select-none group ${dashboardActiveCard === 'upcoming' ? 'ring-2 ring-indigo-500 ring-offset-2 bg-indigo-50/20' : ''}">
           <div class="flex items-center justify-between pb-1">
             <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Upcoming Retests</span>
             <i data-lucide="calendar" class="h-4 w-4 text-indigo-500"></i>
           </div>
-          <div class="text-2xl font-bold font-display text-slate-900">${upcomingRetests.length}</div>
-          <p class="text-[11px] text-slate-400 mt-1">Due in next 30 days</p>
+          <div class="text-2xl font-bold font-display text-indigo-700">${upcomingRetests.length}</div>
+          <div class="flex items-center justify-between mt-1 text-[11px]">
+            <span class="text-slate-400">Due in next 30 days</span>
+            <span class="text-indigo-600 font-medium opacity-80 group-hover:opacity-100">${dashboardActiveCard === 'upcoming' ? '● Active' : 'View →'}</span>
+          </div>
         </div>
       </div>
 
@@ -1174,53 +1400,178 @@ function renderDashboard() {
         </div>
       </div>
 
-      <!-- Action Required Outlets Table -->
-      <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div class="px-6 py-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-          <div>
-            <h2 class="text-base font-bold text-slate-900 font-display flex items-center gap-2">
-              <i data-lucide="alert-circle" class="h-4 w-4 text-orange-600"></i>
-              <span>High Resistance Outlets Requiring Maintenance (${attentionStations.length})</span>
-            </h2>
-            <p class="text-xs text-slate-400">Pits with measured resistance exceeding 2.0 &Omega;</p>
+      <!-- Interactive Actionable Sites Table (Driven by Cards Click) -->
+      <div id="dashboard-action-table" class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden space-y-0 scroll-mt-6">
+        <!-- Table Header & Controls -->
+        <div class="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div class="space-y-0.5">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="p-1.5 rounded-lg bg-white shadow-sm border border-slate-200">
+                <i data-lucide="${activeCategoryIcon}" class="h-4 w-4 ${activeCategoryColor}"></i>
+              </span>
+              <h2 class="text-base font-bold text-slate-900 font-display flex items-center gap-2">
+                <span>${activeCategoryTitle}</span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-bold ${activeCategoryBadge}">${totalCardSites}</span>
+              </h2>
+            </div>
+            <p class="text-xs text-slate-500">${activeCategorySubtitle}</p>
           </div>
-          <a href="#/reports" class="text-xs font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1">
-            Browse All Outlets <i data-lucide="arrow-right" class="h-3 w-3"></i>
-          </a>
+
+          <!-- Quick Search & Directory Link -->
+          <div class="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
+            <div class="relative w-full sm:w-64">
+              <i data-lucide="search" class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400"></i>
+              <input 
+                type="text" 
+                id="dash-table-search-input" 
+                placeholder="Search station or ROID..." 
+                value="${escapeHtml(dashboardTableSearch)}" 
+                class="w-full pl-8 pr-7 py-1.5 text-xs rounded-lg border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" 
+              />
+              ${dashboardTableSearch ? `
+                <button onclick="clearDashboardTableSearch()" class="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                  <i data-lucide="x" class="h-3 w-3"></i>
+                </button>
+              ` : ''}
+            </div>
+
+            <a 
+              href="#/reports?status=${dashboardActiveCard}" 
+              onclick="reportsState.status='${dashboardActiveCard}';reportsState.page=1;" 
+              class="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 shadow-sm transition shrink-0" 
+              title="Open in full Outlet Directory"
+            >
+              <span>View in Directory</span>
+              <i data-lucide="external-link" class="h-3 w-3 text-blue-600"></i>
+            </a>
+          </div>
         </div>
 
+        <!-- Filter Pill Selector Tabs -->
+        <div class="px-5 py-2.5 bg-slate-100/70 border-b border-slate-200/80 flex items-center gap-1.5 overflow-x-auto text-xs">
+          <span class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mr-1">Filter Sites:</span>
+          <button onclick="setDashboardFilter('due')" class="px-2.5 py-1 rounded-md transition font-semibold cursor-pointer ${dashboardActiveCard === 'due' ? 'bg-red-600 text-white shadow-sm' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'}">
+            Test Due (${dueSites.length})
+          </button>
+          <button onclick="setDashboardFilter('upcoming')" class="px-2.5 py-1 rounded-md transition font-semibold cursor-pointer ${dashboardActiveCard === 'upcoming' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'}">
+            Upcoming Retests (${upcomingRetests.length})
+          </button>
+          <button onclick="setDashboardFilter('action_required')" class="px-2.5 py-1 rounded-md transition font-semibold cursor-pointer ${dashboardActiveCard === 'action_required' ? 'bg-rose-600 text-white shadow-sm' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'}">
+            Action Required (${attentionStations.length})
+          </button>
+          <button onclick="setDashboardFilter('compliant')" class="px-2.5 py-1 rounded-md transition font-semibold cursor-pointer ${dashboardActiveCard === 'compliant' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'}">
+            Compliant (${compliantStations.length})
+          </button>
+          <button onclick="setDashboardFilter('all')" class="px-2.5 py-1 rounded-md transition font-semibold cursor-pointer ${dashboardActiveCard === 'all' ? 'bg-slate-800 text-white shadow-sm' : 'bg-white hover:bg-slate-200 text-slate-700 border border-slate-200'}">
+            All Sites (${totalSites})
+          </button>
+        </div>
+
+        <!-- Table of Matching Sites -->
         <div class="overflow-x-auto">
           <table class="w-full text-left text-sm">
             <thead class="bg-slate-50 text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-100">
               <tr>
-                <th class="px-6 py-3 font-semibold">ROID</th>
-                <th class="px-6 py-3 font-semibold">Retail Outlet</th>
-                <th class="px-6 py-3 font-semibold">Sales Area</th>
-                <th class="px-6 py-3 font-semibold">Officer (EO)</th>
-                <th class="px-6 py-3 font-semibold">Technician (MST)</th>
-                <th class="px-6 py-3 font-semibold">Max Reading</th>
-                <th class="px-6 py-3 font-semibold">Action</th>
+                <th class="px-5 py-3 font-semibold">ROID</th>
+                <th class="px-5 py-3 font-semibold">Retail Outlet</th>
+                <th class="px-5 py-3 font-semibold">Sales Area</th>
+                <th class="px-5 py-3 font-semibold">Officer / MST</th>
+                <th class="px-5 py-3 font-semibold">Last Tested</th>
+                <th class="px-5 py-3 font-semibold">Next Retest Due</th>
+                <th class="px-5 py-3 font-semibold">Max Reading</th>
+                <th class="px-5 py-3 font-semibold">Action to be Taken</th>
+                <th class="px-5 py-3 font-semibold text-right">Actions</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
-              ${attentionStations.slice(0, 8).map(r => {
+              ${cardPageItems.length === 0 ? `
+                <tr>
+                  <td colspan="9" class="p-8 text-center text-slate-400 text-xs">
+                    No outlets match the selected card filter or search criteria.
+                  </td>
+                </tr>
+              ` : cardPageItems.map(r => {
                 const pits = r.pits || [];
-                const maxVal = Math.max(...pits.map(p => Number(p.gridEarthValue || 0))).toFixed(1);
+                const maxVal = pits.length > 0 ? Math.max(...pits.map(p => Number(p.gridEarthValue || 0))).toFixed(1) : "0.0";
+                const isHigh = Number(maxVal) > 2.0;
+                const retestInfo = getRetestStatus(r);
+                const actionInfo = getActionToBeTaken(r);
+
                 return `
-                  <tr class="hover:bg-orange-50/40 transition">
-                    <td class="px-6 py-3.5 font-mono font-bold text-xs text-slate-700">${escapeHtml(r.retailCode)}</td>
-                    <td class="px-6 py-3.5 font-semibold text-slate-900"><a href="#/reports/${r.id}" class="hover:text-blue-600">${escapeHtml(r.siteName)}</a></td>
-                    <td class="px-6 py-3.5 text-xs text-slate-600"><span class="px-2 py-0.5 rounded bg-slate-100 font-medium">${escapeHtml(r.salesArea)}</span></td>
-                    <td class="px-6 py-3.5 text-xs text-slate-700">${escapeHtml(r.eoName)}</td>
-                    <td class="px-6 py-3.5 text-xs text-slate-700">${escapeHtml(r.mstName)}</td>
-                    <td class="px-6 py-3.5 font-mono font-bold text-orange-600 text-xs">${maxVal} &Omega;</td>
-                    <td class="px-6 py-3.5"><a href="#/reports/${r.id}" class="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-800">Inspect <i data-lucide="chevron-right" class="h-3.5 w-3.5"></i></a></td>
+                  <tr class="hover:bg-slate-50 transition">
+                    <td class="px-5 py-3 font-mono font-bold text-xs text-slate-700">${escapeHtml(r.retailCode)}</td>
+                    <td class="px-5 py-3 font-semibold text-slate-900">
+                      <a href="#/reports/${r.id}" class="hover:text-blue-600">${escapeHtml(r.siteName)}</a>
+                    </td>
+                    <td class="px-5 py-3 text-xs text-slate-600">
+                      <span class="px-2 py-0.5 rounded bg-slate-100 font-medium">${escapeHtml(r.salesArea)}</span>
+                    </td>
+                    <td class="px-5 py-3 text-xs text-slate-700">
+                      <div class="leading-tight">
+                        <span class="font-medium text-slate-800">${escapeHtml(r.eoName)}</span>
+                        <div class="text-[10px] text-slate-400">MST: ${escapeHtml(r.mstName)}</div>
+                      </div>
+                    </td>
+                    <td class="px-5 py-3 text-xs text-slate-600 font-mono">${formatDate(r.testDate)}</td>
+                    <td class="px-5 py-3 text-xs">
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="font-mono text-slate-700">${formatDate(r.nextTestDate)}</span>
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${retestInfo.badgeClass}">
+                          ${retestInfo.label}
+                        </span>
+                      </div>
+                    </td>
+                    <td class="px-5 py-3 font-mono font-bold text-xs ${isHigh ? 'text-rose-600' : 'text-slate-800'}">
+                      ${maxVal} &Omega;
+                    </td>
+                    <td class="px-5 py-3 text-xs">
+                      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${actionInfo.badge}">
+                        ${actionInfo.action}
+                      </span>
+                    </td>
+                    <td class="px-5 py-3 text-right">
+                      <div class="flex items-center justify-end gap-1.5">
+                        <button onclick="actionLaunchMstUpdate('${r.id}')" class="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs transition shadow-sm" title="Launch MST Update Test for this outlet">
+                          <i data-lucide="zap" class="h-3 w-3"></i>
+                          <span>Update</span>
+                        </button>
+                        <a href="#/reports/${r.id}" class="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-slate-100 rounded-md" title="Inspect Station">
+                          <i data-lucide="chevron-right" class="h-4 w-4"></i>
+                        </a>
+                      </div>
+                    </td>
                   </tr>
                 `;
               }).join('')}
             </tbody>
           </table>
         </div>
+
+        <!-- Pagination for Active Table -->
+        ${cardPages > 1 ? `
+          <div class="px-5 py-3 border-t border-slate-100 flex items-center justify-between text-xs bg-slate-50/50">
+            <div class="text-slate-500">
+              Showing <strong class="text-slate-800">${cardStartIdx + 1}</strong> to <strong class="text-slate-800">${Math.min(cardStartIdx + dashboardTablePageSize, totalCardSites)}</strong> of <strong class="text-slate-800">${totalCardSites}</strong> outlets
+            </div>
+            <div class="flex items-center gap-1.5">
+              <button 
+                onclick="setDashboardTablePage(${dashboardTablePage - 1})" 
+                ${dashboardTablePage <= 1 ? 'disabled class="opacity-40 cursor-not-allowed"' : 'class="hover:bg-slate-200 cursor-pointer"'} 
+                class="px-2.5 py-1 rounded border border-slate-200 bg-white font-medium text-slate-700"
+              >
+                Previous
+              </button>
+              <span class="px-2 text-slate-600 font-semibold">${dashboardTablePage} / ${cardPages}</span>
+              <button 
+                onclick="setDashboardTablePage(${dashboardTablePage + 1})" 
+                ${dashboardTablePage >= cardPages ? 'disabled class="opacity-40 cursor-not-allowed"' : 'class="hover:bg-slate-200 cursor-pointer"'} 
+                class="px-2.5 py-1 rounded border border-slate-200 bg-white font-medium text-slate-700"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        ` : ''}
       </div>
     </div>
   `;
@@ -1237,6 +1588,20 @@ function renderDashboard() {
   if (eoSelect) eoSelect.addEventListener('change', (e) => { dashboardFilters.eoName = e.target.value; renderDashboard(); });
   if (mstSelect) mstSelect.addEventListener('change', (e) => { dashboardFilters.mstName = e.target.value; renderDashboard(); });
   if (resetBtn) resetBtn.addEventListener('click', () => { dashboardFilters = { salesArea: 'all', eoName: 'all', mstName: 'all' }; renderDashboard(); });
+
+  const dashSearchInput = document.getElementById('dash-table-search-input');
+  if (dashSearchInput) {
+    dashSearchInput.addEventListener('input', (e) => {
+      dashboardTableSearch = e.target.value;
+      dashboardTablePage = 1;
+      renderDashboard();
+      const newInput = document.getElementById('dash-table-search-input');
+      if (newInput) {
+        newInput.focus();
+        newInput.setSelectionRange(newInput.value.length, newInput.value.length);
+      }
+    });
+  }
 
   initSalesAreaChart(salesAreaStats);
   initSpectrumChart(idealPits, safePits, highPits);
@@ -1318,10 +1683,17 @@ function renderReports() {
 
     const hasAlert = (r.pits || []).some(p => Number(p.gridEarthValue) > 2.0);
     if (reportsState.status === 'compliant' && hasAlert) return false;
-    if (reportsState.status === 'attention' && !hasAlert) return false;
+    if ((reportsState.status === 'attention' || reportsState.status === 'action_required' || reportsState.status === 'high_pits') && !hasAlert) return false;
+    if (reportsState.status === 'due' && !isSiteDue(r)) return false;
+    if (reportsState.status === 'upcoming' && !isSiteUpcoming(r, 30)) return false;
 
     return true;
   });
+
+  const dueCount = allReports.filter(isSiteDue).length;
+  const upcomingCount = allReports.filter(r => isSiteUpcoming(r, 30)).length;
+  const attentionCount = allReports.filter(r => (r.pits || []).some(p => Number(p.gridEarthValue) > 2.0)).length;
+  const compliantCount = allReports.length - attentionCount;
 
   const totalFiltered = filtered.length;
   const totalPages = Math.ceil(totalFiltered / reportsState.pageSize) || 1;
@@ -1373,10 +1745,12 @@ function renderReports() {
         </div>
 
         <div class="flex flex-col sm:flex-row sm:items-center justify-between pt-2 border-t border-slate-100 gap-2">
-          <div class="flex bg-slate-100 p-1 rounded-lg text-xs font-medium text-slate-600">
-            <button class="dir-status-pill px-3 py-1 rounded-md ${reportsState.status === 'all' ? 'bg-white text-slate-900 shadow-sm font-semibold' : ''}" data-status="all">All (${totalFiltered})</button>
-            <button class="dir-status-pill px-3 py-1 rounded-md ${reportsState.status === 'compliant' ? 'bg-white text-emerald-700 shadow-sm font-semibold' : ''}" data-status="compliant">Compliant</button>
-            <button class="dir-status-pill px-3 py-1 rounded-md ${reportsState.status === 'attention' ? 'bg-white text-orange-700 shadow-sm font-semibold' : ''}" data-status="attention">Attention Required</button>
+          <div class="flex flex-wrap bg-slate-100 p-1 rounded-lg text-xs font-medium text-slate-600 gap-1">
+            <button class="dir-status-pill px-2.5 py-1 rounded-md transition ${reportsState.status === 'all' ? 'bg-white text-slate-900 shadow-sm font-semibold' : 'hover:text-slate-900'}" data-status="all">All (${allReports.length})</button>
+            <button class="dir-status-pill px-2.5 py-1 rounded-md transition ${reportsState.status === 'due' ? 'bg-red-600 text-white shadow-sm font-semibold' : 'text-red-700 hover:text-red-900'}" data-status="due">Test Due (${dueCount})</button>
+            <button class="dir-status-pill px-2.5 py-1 rounded-md transition ${reportsState.status === 'upcoming' ? 'bg-indigo-600 text-white shadow-sm font-semibold' : 'text-indigo-700 hover:text-indigo-900'}" data-status="upcoming">Upcoming Retests (${upcomingCount})</button>
+            <button class="dir-status-pill px-2.5 py-1 rounded-md transition ${reportsState.status === 'attention' || reportsState.status === 'action_required' ? 'bg-rose-600 text-white shadow-sm font-semibold' : 'text-rose-700 hover:text-rose-900'}" data-status="attention">Action Required (${attentionCount})</button>
+            <button class="dir-status-pill px-2.5 py-1 rounded-md transition ${reportsState.status === 'compliant' ? 'bg-emerald-600 text-white shadow-sm font-semibold' : 'text-emerald-700 hover:text-emerald-900'}" data-status="compliant">Compliant (${compliantCount})</button>
           </div>
           <span class="text-xs text-slate-500">Showing <strong class="text-slate-800">${pageItems.length}</strong> of <strong class="text-slate-800">${totalFiltered}</strong></span>
         </div>
@@ -1387,6 +1761,8 @@ function renderReports() {
           const pits = r.pits || [];
           const hasAlert = pits.some(p => Number(p.gridEarthValue) > 2.0);
           const maxVal = Math.max(...pits.map(p => Number(p.gridEarthValue || 0))).toFixed(1);
+          const retestInfo = getRetestStatus(r);
+          const actionInfo = getActionToBeTaken(r);
 
           return `
             <div class="bg-white rounded-xl border border-slate-200 hover:border-blue-300 hover:shadow-md transition-all p-4 sm:p-5">
@@ -1400,7 +1776,7 @@ function renderReports() {
                       ${escapeHtml(r.siteName)}
                     </a>
                   </div>
-                  <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                  <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                     <span class="font-medium text-slate-700"><i data-lucide="map-pin" class="h-3.5 w-3.5 inline text-slate-400"></i> ${escapeHtml(r.salesArea)}</span>
                     <span>&bull;</span>
                     <span>EO: <strong>${escapeHtml(r.eoName)}</strong></span>
@@ -1408,18 +1784,22 @@ function renderReports() {
                     <span>MST: <strong>${escapeHtml(r.mstName)}</strong></span>
                     <span>&bull;</span>
                     <span>Tested: ${formatDate(r.testDate)}</span>
+                    <span>&bull;</span>
+                    <span class="font-mono text-slate-700">Next Due: <strong>${formatDate(r.nextTestDate)}</strong></span>
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${retestInfo.badgeClass}">${retestInfo.label}</span>
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${actionInfo.badge}">${actionInfo.action}</span>
                   </div>
                 </div>
 
-                <div class="flex items-center justify-between lg:justify-end gap-5 border-t lg:border-t-0 pt-3 lg:pt-0">
+                <div class="flex items-center justify-between lg:justify-end gap-4 border-t lg:border-t-0 pt-3 lg:pt-0">
                   <div class="text-left sm:text-right">
                     <div class="text-[10px] uppercase text-slate-400 font-semibold">Max Reading</div>
-                    <div class="text-xs font-mono font-bold ${hasAlert ? 'text-orange-600' : 'text-slate-800'}">${maxVal} &Omega;</div>
+                    <div class="text-xs font-mono font-bold ${hasAlert ? 'text-rose-600' : 'text-slate-800'}">${maxVal} &Omega;</div>
                   </div>
                   <div class="flex flex-col items-end gap-1 min-w-[85px]">
                     <span class="text-[11px] text-slate-400">${pits.length} Pits</span>
                     ${hasAlert ? `
-                      <span class="inline-flex items-center rounded-full bg-orange-50 px-2 py-0.5 text-xs font-medium text-orange-700 ring-1 ring-inset ring-orange-600/20 gap-1">
+                      <span class="inline-flex items-center rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-600/20 gap-1">
                         <i data-lucide="alert-triangle" class="h-3 w-3"></i> Attention
                       </span>
                     ` : `
@@ -1429,6 +1809,10 @@ function renderReports() {
                     `}
                   </div>
                   <div class="flex items-center gap-1">
+                    <button onclick="actionLaunchMstUpdate('${r.id}')" class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs transition shadow-sm" title="Launch MST Update">
+                      <i data-lucide="zap" class="h-3.5 w-3.5"></i>
+                      <span class="hidden sm:inline">Update</span>
+                    </button>
                     <a href="#/reports/${r.id}" class="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-slate-100" title="View"><i data-lucide="external-link" class="h-4 w-4"></i></a>
                     <button onclick="downloadReportPdf('${r.id}')" class="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-slate-100" title="PDF"><i data-lucide="download" class="h-4 w-4"></i></button>
                     <a href="#/reports/${r.id}/edit" class="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-slate-100" title="Edit"><i data-lucide="edit-3" class="h-4 w-4"></i></a>
@@ -3527,7 +3911,20 @@ function handleRouting() {
     renderUpdateTestView();
   } else if (cleanHash === '/' || cleanHash === '') {
     renderDashboard();
-  } else if (cleanHash === '/reports') {
+  } else if (cleanHash === '/reports' || cleanHash.startsWith('/reports?')) {
+    if (cleanHash.includes('?')) {
+      const queryStr = cleanHash.split('?')[1] || '';
+      const params = new URLSearchParams(queryStr);
+      const statusParam = params.get('status');
+      if (statusParam) {
+        if (statusParam === 'action_required' || statusParam === 'high_pits') {
+          reportsState.status = 'attention';
+        } else {
+          reportsState.status = statusParam;
+        }
+        reportsState.page = 1;
+      }
+    }
     renderReports();
   } else if (cleanHash === '/hsse-audit') {
     renderHsseAuditView();
