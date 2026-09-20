@@ -1,5 +1,5 @@
 // Service Worker for BPCL Earthing Testing App (By CLR FACILITY SERVICES)
-const CACHE_NAME = 'bpcl-earthing-v4.4';
+const CACHE_NAME = 'bpcl-earthing-v4.5';
 
 const STATIC_ASSETS = [
   './',
@@ -17,7 +17,7 @@ const STATIC_ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[SW] Pre-caching static assets for v4.4');
+      console.log('[SW] Pre-caching static assets for v4.5');
       return cache.addAll(STATIC_ASSETS).catch((err) => {
         console.warn('[SW] Cache addAll warning:', err);
       });

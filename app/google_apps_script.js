@@ -387,6 +387,39 @@ function readAllReportsFromSheet(filterRoid) {
       }
     }
 
+    // Secondary fallback: parse All Pits Summary if it has more pits (e.g. EP-1 to EP-12+)
+    const summaryCol = colMap["All Pits Summary"];
+    const summaryText = summaryCol !== undefined ? String(row[summaryCol] || "") : "";
+    if (summaryText && summaryText.includes("|")) {
+      const parts = summaryText.split("|");
+      if (parts.length > pits.length) {
+        const parsedSummaryPits = [];
+        parts.forEach((item, idx) => {
+          const match = item.match(/(EP-[\w-]+):\s*([\d.]+)\s*Ω/);
+          if (match) {
+            const pitNum = match[1].trim();
+            const val = parseFloat(match[2]) || 0.0;
+            // Retain any existing location/equipment if present in 1..5
+            const existingP = pits.find(ep => ep.pitNumber === pitNum);
+            parsedSummaryPits.push({
+              id: `ro-${roid}-p${idx + 1}`,
+              reportId: `ro-${roid}`,
+              pitNumber: pitNum,
+              location: existingP ? existingP.location : "Station Yard",
+              equipmentConnected: existingP ? existingP.equipmentConnected : `Earth Pit ${idx + 1}`,
+              gridEarthValue: val,
+              remarks: val <= 2.0 ? "Ok" : "Watering Required",
+              photoUrl: existingP ? existingP.photoUrl : "",
+              sortOrder: idx
+            });
+          }
+        });
+        if (parsedSummaryPits.length > pits.length) {
+          pits = parsedSummaryPits;
+        }
+      }
+    }
+
     // Parse instrument make and serial
     let earthTesterMake = "Waco";
     let earthTesterSerial = "WC-354672";

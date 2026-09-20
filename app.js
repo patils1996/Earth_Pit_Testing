@@ -262,9 +262,27 @@ class Store {
     const webhookUrl = getGoogleWebhookUrl();
     if (!navigator.onLine || !webhookUrl) return { success: false, reason: "offline_or_no_url" };
     try {
-      const resp = await fetch(`${webhookUrl}?action=get_reports&_t=${Date.now()}`);
-      if (!resp.ok) return { success: false, reason: `http_${resp.status}` };
-      const data = await resp.json();
+      let data = null;
+      // 1. Try GET query
+      try {
+        const resp = await fetch(`${webhookUrl}?action=get_reports&_t=${Date.now()}`);
+        if (resp.ok) data = await resp.json().catch(() => null);
+      } catch(getErr) {
+        console.warn("[CloudSync] GET failed, attempting POST query fallback...", getErr);
+      }
+
+      // 2. Fallback to POST query if GET did not return reports array
+      if (!data || !Array.isArray(data.reports)) {
+        try {
+          const postResp = await fetch(webhookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify({ action: "get_reports", timestamp: new Date().toISOString() })
+          });
+          if (postResp.ok) data = await postResp.json().catch(() => null);
+        } catch(postErr) {}
+      }
+
       if (data && data.status === "success" && Array.isArray(data.reports) && data.reports.length > 0) {
         let updatedCount = 0;
         const localMap = new Map(this.reports.map(r => [String(r.retailCode || r.id), r]));
@@ -293,6 +311,13 @@ class Store {
         if (updatedCount > 0 || force) {
           try { localStorage.setItem('earth-pit-reports', JSON.stringify(this.reports)); } catch(e) {}
           this.notify();
+          if (updatedCount > 0 && !force) {
+            showToast({
+              title: "☁️ Live Cloud Update",
+              description: `Received latest inspection updates for ${updatedCount} station(s).`,
+              variant: "default"
+            });
+          }
         }
         try { localStorage.setItem('bpcl_last_cloud_sync', new Date().toISOString()); } catch(e) {}
         return { success: true, count: data.reports.length, updated: updatedCount };
@@ -321,7 +346,7 @@ class Store {
     return this.reports.find(r => r.id === id || String(r.retailCode) === String(id));
   }
 
-  async saveReport(reportData) {
+  async saveReport(reportData, skipCloudPush = false) {
     let savedReport = null;
     const isEdit = Boolean(reportData.id && this.getReport(reportData.id));
 
@@ -332,6 +357,8 @@ class Store {
     if (reportData.testDate) {
       reportData.nextTestDate = calculateNextTestDate(reportData.testDate);
     }
+
+    reportData.updatedAt = new Date().toISOString();
 
     if (this.serverAvailable) {
       try {
@@ -358,6 +385,14 @@ class Store {
 
     try { localStorage.setItem('earth-pit-reports', JSON.stringify(this.reports)); } catch(e) {}
     this.notify();
+
+    // Auto-push every change across the entire application to Google Cloud
+    if (!skipCloudPush) {
+      pushToGoogle(savedReport).catch(err => {
+        console.warn('[CloudSync] Auto-push to Google failed:', err);
+      });
+    }
+
     return savedReport;
   }
 
@@ -1082,8 +1117,8 @@ function renderUpdateTestView() {
         }))
       };
 
-      // 1. Save to local SQLite & store
-      const saved = await store.saveReport(payload);
+      // 1. Save to local SQLite & store (skip immediate push because pushToGoogle with photos is called right after)
+      const saved = await store.saveReport(payload, true);
 
       // 2. Prepare photos payload for Google Drive
       const photosForGoogle = mstPitsData
@@ -3899,11 +3934,31 @@ window.testGoogleConnection = async () => {
       body: JSON.stringify({ action: "ping", timestamp: new Date().toISOString() })
     });
 
-    showToast({
-      title: "✅ Connection Verified Live!",
-      description: "Google Apps Script Webhook is active, public, and accepting records.",
-      variant: "success"
-    });
+    // Step 3: Check bidirectional query capability
+    let isV5 = false;
+    try {
+      const queryCheck = await fetch(`${url}?action=get_reports&_t=${Date.now()}`);
+      if (queryCheck.ok) {
+        const qData = await queryCheck.json().catch(() => null);
+        if (qData && qData.status === "success" && Array.isArray(qData.reports)) {
+          isV5 = true;
+        }
+      }
+    } catch(qErr) {}
+
+    if (isV5) {
+      showToast({
+        title: "✅ Full Two-Way Sync Active!",
+        description: "Google Apps Script v5.0 is active! Automatic live sync is enabled for all users across all devices.",
+        variant: "success"
+      });
+    } else {
+      showToast({
+        title: "✅ Webhook Live (Push Active)",
+        description: "Google Sheet & Drive photo push is operational! To enable automatic multi-user sync: click 'Copy Code.gs' below and select 'New version' when deploying.",
+        variant: "default"
+      });
+    }
   } catch(e) {
     console.warn("Connection test failed:", e);
     window.showGoogleSyncDiagnosticModal(e.message);
@@ -4113,6 +4168,37 @@ window.addEventListener('DOMContentLoaded', async () => {
   handleRouting();
   window.addEventListener('hashchange', handleRouting);
   updatePendingBadge();
+
+  // 1. Live reactive UI update whenever store receives cloud updates
+  store.subscribe(() => {
+    const cleanHash = window.location.hash.replace('#', '') || '/';
+    // Avoid disrupting active typing in forms
+    const isTyping = document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA');
+    const isEditForm = cleanHash.includes('/edit') || (cleanHash === '/update-test' && isTyping);
+    if (!isEditForm) {
+      handleRouting();
+    }
+  });
+
+  // 2. Periodic automatic background cloud sync (every 30 seconds)
+  setInterval(() => {
+    if (document.visibilityState === 'visible' && navigator.onLine) {
+      store.syncFromGoogleCloud();
+    }
+  }, 30000);
+
+  // 3. Auto-sync when user returns to app on phone or laptop
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && navigator.onLine) {
+      store.syncFromGoogleCloud();
+    }
+  });
+
+  // 4. Auto-sync when device reconnects to internet
+  window.addEventListener('online', () => {
+    window.syncPendingQueueNow();
+    store.syncFromGoogleCloud(true);
+  });
 
   // PWA Modal button listeners
   const confirmInstallBtn = document.getElementById('btn-pwa-confirm-install');
