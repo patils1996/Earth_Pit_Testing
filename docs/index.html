@@ -80,10 +80,10 @@
       </span>
 
       <!-- Google Sync Quick Action (Mobile Header) -->
-      <a href="#/google-sync" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-bold bg-blue-600 text-white shadow hover:bg-blue-700 transition">
-        <i data-lucide="cloud" class="h-3.5 w-3.5"></i>
+      <button type="button" onclick="triggerLiveCloudSync(this)" class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-bold bg-blue-600 text-white shadow hover:bg-blue-700 transition active:scale-95 cursor-pointer" title="Live Cloud Sync">
+        <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>
         <span>Sync</span>
-      </a>
+      </button>
     </div>
   </header>
 
@@ -125,12 +125,15 @@
         <span>HSSE Audit</span>
       </a>
 
-      <!-- 5. Google Sync (Prominent Blue Pill matching screenshot) -->
-      <div class="pt-2">
-        <a href="#/google-sync" id="nav-google-sync" class="flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition-all bg-blue-600 text-white shadow-lg shadow-blue-600/30 hover:bg-blue-700">
+      <!-- 5. Google Sync (Prominent Blue Pill with Quick Sync) -->
+      <div class="pt-2 flex items-center gap-1.5">
+        <a href="#/google-sync" id="nav-google-sync" class="flex-1 flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-bold transition-all bg-blue-600 text-white shadow-lg shadow-blue-600/30 hover:bg-blue-700">
           <i data-lucide="cloud" class="h-4 w-4"></i>
           <span>Google Sync</span>
         </a>
+        <button type="button" onclick="triggerLiveCloudSync(this)" class="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white transition shadow border border-slate-700 active:scale-95 cursor-pointer" title="Live Cloud Sync (Pull & Push)">
+          <i data-lucide="refresh-cw" class="h-4 w-4 text-blue-400"></i>
+        </button>
       </div>
     </nav>
 
@@ -250,6 +253,6 @@
   </div>
 
   <!-- Main Application Script -->
-  <script src="./app.js?v=4.3"></script>
+  <script src="./app.js?v=4.4"></script>
 </body>
 </html>

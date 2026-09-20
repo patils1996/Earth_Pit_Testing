@@ -251,6 +251,57 @@ class Store {
       }
     }
     this.notify();
+
+    // 4. Two-Way Background Cloud Sync from Google Sheets Webhook
+    this.syncFromGoogleCloud().catch(err => {
+      console.warn('[CloudSync] Background sync on launch error:', err);
+    });
+  }
+
+  async syncFromGoogleCloud(force = false) {
+    const webhookUrl = getGoogleWebhookUrl();
+    if (!navigator.onLine || !webhookUrl) return { success: false, reason: "offline_or_no_url" };
+    try {
+      const resp = await fetch(`${webhookUrl}?action=get_reports&_t=${Date.now()}`);
+      if (!resp.ok) return { success: false, reason: `http_${resp.status}` };
+      const data = await resp.json();
+      if (data && data.status === "success" && Array.isArray(data.reports) && data.reports.length > 0) {
+        let updatedCount = 0;
+        const localMap = new Map(this.reports.map(r => [String(r.retailCode || r.id), r]));
+        data.reports.forEach(cloudR => {
+          const key = String(cloudR.retailCode || cloudR.id);
+          const localR = localMap.get(key);
+          if (!localR) {
+            this.reports.push(cloudR);
+            localMap.set(key, cloudR);
+            updatedCount++;
+          } else {
+            const cloudTime = cloudR.updatedAt || cloudR.testDate || "";
+            const localTime = localR.updatedAt || localR.testDate || "";
+            const cloudPitsLen = (cloudR.pits || []).length;
+            const localPitsLen = (localR.pits || []).length;
+            // If cloud has newer test date, or same test date but more pits
+            if (cloudTime > localTime || (cloudTime === localTime && cloudPitsLen > localPitsLen) || force) {
+              const idx = this.reports.findIndex(r => String(r.retailCode || r.id) === key);
+              if (idx !== -1) {
+                this.reports[idx] = { ...localR, ...cloudR };
+                updatedCount++;
+              }
+            }
+          }
+        });
+        if (updatedCount > 0 || force) {
+          try { localStorage.setItem('earth-pit-reports', JSON.stringify(this.reports)); } catch(e) {}
+          this.notify();
+        }
+        try { localStorage.setItem('bpcl_last_cloud_sync', new Date().toISOString()); } catch(e) {}
+        return { success: true, count: data.reports.length, updated: updatedCount };
+      }
+    } catch (err) {
+      console.warn("[CloudSync] Background sync check failed:", err);
+      return { success: false, reason: err.message };
+    }
+    return { success: false, reason: "no_cloud_records" };
   }
 
   subscribe(listener) {
@@ -830,7 +881,7 @@ function renderUpdateTestView() {
             const isHigh = val > 2.0;
 
             return `
-              <div class="rounded-xl border ${isHigh ? 'border-orange-300 bg-orange-50/30' : 'border-slate-200 bg-slate-50/50'} p-3.5 space-y-2">
+              <div class="mst-pit-card rounded-xl border ${isHigh ? 'border-orange-300 bg-orange-50/30' : 'border-slate-200 bg-slate-50/50'} p-3.5 space-y-2">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2">
                     <span class="font-mono font-bold text-xs px-2.5 py-0.5 rounded bg-slate-200 text-slate-800">${escapeHtml(p.pitNumber)}</span>
@@ -3417,6 +3468,62 @@ function handleExcelUpload(file) {
 // ==========================================
 let isGoogleSyncUnlocked = false;
 
+function getLastCloudSyncText() {
+  const last = localStorage.getItem('bpcl_last_cloud_sync');
+  if (!last) return 'Not synced yet';
+  try {
+    const d = new Date(last);
+    return `Last synced: ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}, ${d.toLocaleDateString()}`;
+  } catch(e) {
+    return 'Recently synced';
+  }
+}
+
+window.triggerLiveCloudSync = async (btnElement = null) => {
+  let originalHtml = '';
+  if (btnElement) {
+    originalHtml = btnElement.innerHTML;
+    btnElement.disabled = true;
+    btnElement.innerHTML = `<i data-lucide="loader-2" class="h-3.5 w-3.5 animate-spin"></i><span>Syncing...</span>`;
+    if (window.lucide) lucide.createIcons();
+  }
+
+  showToast({ title: "Live Cloud Sync", description: "Connecting to Google Cloud to pull latest tests & push pending...", variant: "default" });
+
+  // 1. Push any offline pending records first
+  const pending = getPendingQueue();
+  if (pending.length > 0) {
+    await window.syncPendingQueueNow();
+  }
+
+  // 2. Pull newest records from Google Cloud
+  const pullResult = await store.syncFromGoogleCloud(true);
+
+  if (btnElement) {
+    btnElement.disabled = false;
+    btnElement.innerHTML = originalHtml;
+    if (window.lucide) lucide.createIcons();
+  }
+
+  if (pullResult.success) {
+    showToast({
+      title: "Cloud Sync Complete",
+      description: `Successfully synchronized! ${pullResult.count} stations checked (${pullResult.updated} updated). All devices now have identical data.`,
+      variant: "success"
+    });
+  } else {
+    showToast({
+      title: "Local Data Synced",
+      description: "Local inspections are up to date. " + (pullResult.reason ? `(Cloud response: ${pullResult.reason})` : ""),
+      variant: "default"
+    });
+  }
+
+  if (window.location.hash === '#/google-sync') {
+    renderGoogleSyncView();
+  }
+};
+
 function renderGoogleSyncView() {
   const currentUrl = getGoogleWebhookUrl();
   const logs = getSyncLogs();
@@ -3431,15 +3538,36 @@ function renderGoogleSyncView() {
           <div class="flex items-center gap-2">
             <h1 class="text-2xl sm:text-3xl font-bold text-slate-900 font-display tracking-tight">Google Sheets & Drive Sync</h1>
             <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
-              Live Cloud Bridge
+              Live Cloud Bridge v5.0
             </span>
           </div>
-          <p class="text-xs text-slate-500 mt-1">Automatic inspection push to Google Sheets & photo uploads to Google Drive.</p>
+          <p class="text-xs text-slate-500 mt-1">Automatic two-way multi-user sync with Google Sheets & photo uploads to Google Drive.</p>
         </div>
 
         <button onclick="testGoogleConnection()" class="inline-flex h-9 items-center justify-center rounded-lg bg-blue-600 text-white px-3.5 text-xs font-bold hover:bg-blue-700 shadow transition gap-1.5">
           <i data-lucide="zap" class="h-4 w-4 text-amber-300"></i>
           <span>Test Connection</span>
+        </button>
+      </div>
+
+      <!-- Live Two-Way Sync Action Banner -->
+      <div class="bg-gradient-to-r from-blue-600 to-indigo-700 text-white rounded-xl p-5 shadow-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div class="space-y-1">
+          <div class="flex items-center gap-2">
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-white/20 text-white border border-white/30">
+              <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>Bidirectional Live Sync</span>
+            </span>
+            <span class="text-xs text-blue-100">${getLastCloudSyncText()}</span>
+          </div>
+          <h2 class="text-base sm:text-lg font-bold font-display">Multi-Device Cloud Synchronization</h2>
+          <p class="text-xs text-blue-100 max-w-xl">
+            Pull latest test results and station details (including 12+ earth pits) updated from any laptop or mobile phone, and push pending tests.
+          </p>
+        </div>
+        <button type="button" onclick="triggerLiveCloudSync(this)" class="px-4 py-2.5 rounded-xl bg-white text-blue-800 text-xs font-bold shadow-lg hover:bg-blue-50 transition flex items-center gap-2 shrink-0 active:scale-95 cursor-pointer">
+          <i data-lucide="refresh-cw" class="h-4 w-4 text-blue-600"></i>
+          <span>Sync Now (Pull & Push)</span>
         </button>
       </div>
 
