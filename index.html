@@ -177,6 +177,20 @@
     </a>
   </nav>
 
+  <!-- Global Sync Status Bar (shown across all pages) -->
+  <div id="global-sync-bar" class="md:pl-64 hidden">
+    <div id="sync-bar-inner" class="flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-amber-50 border-b border-amber-200 text-amber-800">
+      <div class="flex items-center gap-2">
+        <span id="sync-bar-dot" class="h-2 w-2 rounded-full bg-amber-400 animate-pulse shrink-0"></span>
+        <span id="sync-bar-msg">Checking cloud sync status...</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="triggerLiveCloudSync(this)" id="sync-bar-btn" class="px-2 py-0.5 rounded-full bg-amber-600 text-white text-[10px] font-bold hover:bg-amber-700 transition">Sync Now</button>
+        <button onclick="document.getElementById('global-sync-bar').classList.add('hidden')" class="text-amber-500 hover:text-amber-700 transition" title="Dismiss">✕</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Main Content Area -->
   <div class="md:pl-64 flex flex-col min-h-screen">
     <main id="app-content" class="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full transition-all">
@@ -253,6 +267,6 @@
   </div>
 
   <!-- Main Application Script -->
-  <script src="./app.js?v=4.5"></script>
+  <script src="./app.js?v=4.6"></script>
 </body>
 </html>

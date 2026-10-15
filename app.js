@@ -446,6 +446,188 @@ function setGoogleWebhookUrl(url) {
   }
 }
 
+// ---- Global Sync Status Bar ----
+// syncBarState: 'checking' | 'v5_ok' | 'push_only' | 'offline'
+let _syncBarState = 'checking';
+let _syncBarV5Checked = false;
+
+function updateGlobalSyncBar(state, detail) {
+  _syncBarState = state;
+  const bar = document.getElementById('global-sync-bar');
+  const inner = document.getElementById('sync-bar-inner');
+  const dot = document.getElementById('sync-bar-dot');
+  const msg = document.getElementById('sync-bar-msg');
+  const btn = document.getElementById('sync-bar-btn');
+  if (!bar || !inner || !dot || !msg) return;
+
+  if (state === 'v5_ok') {
+    bar.classList.add('hidden');
+    inner.className = 'flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-emerald-50 border-b border-emerald-200 text-emerald-800';
+    dot.className = 'h-2 w-2 rounded-full bg-emerald-500 shrink-0';
+    msg.textContent = '✅ Live Bidirectional Sync Active — all users share real-time data.';
+    if (btn) { btn.textContent = 'Sync Now'; btn.className = 'px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700 transition'; }
+  } else if (state === 'push_only') {
+    bar.classList.remove('hidden');
+    inner.className = 'flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-amber-50 border-b border-amber-200 text-amber-800';
+    dot.className = 'h-2 w-2 rounded-full bg-amber-400 animate-pulse shrink-0';
+    msg.textContent = '⚠️ Sync is push-only — other users\' data won\'t auto-update here. Tap to fix.';
+    if (btn) { btn.textContent = 'How to Fix'; btn.className = 'px-2 py-0.5 rounded-full bg-amber-600 text-white text-[10px] font-bold hover:bg-amber-700 transition'; btn.onclick = () => showV5UpgradeGuide(); }
+  } else if (state === 'offline') {
+    bar.classList.remove('hidden');
+    inner.className = 'flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-slate-100 border-b border-slate-200 text-slate-600';
+    dot.className = 'h-2 w-2 rounded-full bg-slate-400 shrink-0';
+    msg.textContent = '📴 You are offline — data saved locally, will sync when connection restores.';
+    if (btn) { btn.textContent = 'Retry'; btn.className = 'px-2 py-0.5 rounded-full bg-slate-500 text-white text-[10px] font-bold hover:bg-slate-600 transition'; btn.onclick = () => { triggerLiveCloudSync(btn); }; }
+  } else {
+    // checking
+    bar.classList.add('hidden');
+  }
+}
+
+async function checkSyncCapabilityAndUpdateBar() {
+  if (_syncBarV5Checked) return;
+  if (!navigator.onLine) { updateGlobalSyncBar('offline'); return; }
+  try {
+    const url = getGoogleWebhookUrl();
+    if (!url) { updateGlobalSyncBar('push_only'); return; }
+    const resp = await fetch(`${url}?action=get_reports&_t=${Date.now()}`);
+    if (resp.ok) {
+      const data = await resp.json().catch(() => null);
+      if (data && data.status === 'success' && Array.isArray(data.reports)) {
+        _syncBarV5Checked = true;
+        updateGlobalSyncBar('v5_ok');
+        return;
+      }
+    }
+    updateGlobalSyncBar('push_only');
+  } catch(e) {
+    updateGlobalSyncBar('push_only');
+  }
+}
+
+// Show the upgrade guide modal
+function showV5UpgradeGuide() {
+  const existing = document.getElementById('v5-upgrade-modal');
+  if (existing) existing.remove();
+
+  const GAS_CODE_URL = './google_apps_script.js';
+  const modalHtml = `
+    <div id="v5-upgrade-modal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+      <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-lg w-full max-h-[92vh] overflow-y-auto">
+        <!-- Header -->
+        <div class="bg-gradient-to-r from-blue-700 to-indigo-800 rounded-t-2xl px-6 py-5 text-white">
+          <div class="flex items-start justify-between">
+            <div class="space-y-1">
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-white/20 border border-white/30">ACTION REQUIRED</span>
+                <span class="text-[11px] text-blue-200 font-medium">One-time 2-minute setup</span>
+              </div>
+              <h2 class="text-lg font-bold font-display">Enable Live Multi-User Sync</h2>
+              <p class="text-xs text-blue-200">
+                Your Google Apps Script needs upgrading to <strong class="text-white">v5.0</strong> to enable real-time bidirectional sync across all users' phones and laptops.
+              </p>
+            </div>
+            <button onclick="document.getElementById('v5-upgrade-modal').remove()" class="text-white/60 hover:text-white ml-4 mt-1 shrink-0">
+              <i data-lucide="x" class="h-5 w-5"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Current status -->
+        <div class="px-6 pt-5 pb-0">
+          <div class="flex gap-3 p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900">
+            <i data-lucide="alert-triangle" class="h-4 w-4 text-amber-600 shrink-0 mt-0.5"></i>
+            <div>
+              <p class="font-bold">Current: Push-Only Mode (v4.0)</p>
+              <p class="text-amber-700 mt-0.5">Inspections ARE being saved to Google Sheets. But other devices <strong>cannot pull updated data</strong> from the cloud — so when you update BP Kotur 1 on this phone, the mobile/laptop of another user won't see it until GAS v5.0 is deployed.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Steps -->
+        <div class="px-6 py-4 space-y-3">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-1.5">
+            <i data-lucide="list-checks" class="h-4 w-4 text-blue-600"></i>
+            <span>How to upgrade in 2 minutes:</span>
+          </h3>
+
+          <div class="space-y-2 text-xs text-slate-700">
+            <div class="flex gap-3 items-start bg-blue-50 p-3 rounded-xl border border-blue-200">
+              <span class="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-[11px] font-bold shrink-0">1</span>
+              <div>
+                <p class="font-bold text-slate-900">Copy the updated Code.gs</p>
+                <p class="text-slate-500 mt-0.5">Click the button below to copy the full v5.0 Apps Script code to your clipboard.</p>
+                <button onclick="copyAppsScriptCode()" class="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-600 text-white text-[11px] font-bold hover:bg-blue-700 transition">
+                  <i data-lucide="copy" class="h-3 w-3"></i>
+                  <span>Copy Code.gs to Clipboard</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="flex gap-3 items-start bg-slate-50 p-3 rounded-xl border border-slate-200">
+              <span class="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-[11px] font-bold shrink-0">2</span>
+              <div>
+                <p class="font-bold text-slate-900">Open Google Apps Script Editor</p>
+                <p class="text-slate-500 mt-0.5">Go to <a href="https://script.google.com" target="_blank" class="text-blue-600 font-semibold underline">script.google.com</a> → open your BPCL project → paste the copied code into <strong>Code.gs</strong> (select all, replace).</p>
+              </div>
+            </div>
+
+            <div class="flex gap-3 items-start bg-emerald-50 p-3 rounded-xl border border-emerald-200">
+              <span class="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[11px] font-bold shrink-0">3</span>
+              <div>
+                <p class="font-bold text-slate-900">Deploy as New Version</p>
+                <p class="text-slate-500 mt-0.5">Click <strong>Deploy → Manage deployments → Edit (✏️) → Version: New version</strong> → Description: <em>"v5.0 Bidirectional Sync"</em> → Click <strong>Deploy</strong>.</p>
+                <div class="mt-1.5 p-2 bg-emerald-100 rounded-lg text-[10px] text-emerald-900 font-medium">
+                  ✅ Keep "Execute as: Me" and "Who has access: Anyone"
+                </div>
+              </div>
+            </div>
+
+            <div class="flex gap-3 items-start bg-slate-50 p-3 rounded-xl border border-slate-200">
+              <span class="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[11px] font-bold shrink-0">4</span>
+              <div>
+                <p class="font-bold text-slate-900">Come back & Verify</p>
+                <p class="text-slate-500 mt-0.5">After deploying, close the Apps Script tab, return here and click <strong>"Test Connection"</strong> below. The status bar will turn green once v5.0 is confirmed.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Footer actions -->
+        <div class="px-6 pb-5 flex items-center justify-between gap-3 flex-wrap border-t border-slate-100 pt-4">
+          <button
+            onclick="window.open('https://script.google.com', '_blank')"
+            class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 shadow transition"
+          >
+            <i data-lucide="external-link" class="h-3.5 w-3.5"></i>
+            <span>Open script.google.com</span>
+          </button>
+          <div class="flex items-center gap-2">
+            <button
+              onclick="document.getElementById('v5-upgrade-modal').remove()"
+              class="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition"
+            >
+              Later
+            </button>
+            <button
+              onclick="document.getElementById('v5-upgrade-modal').remove(); testGoogleConnection();"
+              class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 shadow transition"
+            >
+              <i data-lucide="zap" class="h-3.5 w-3.5 text-amber-300"></i>
+              <span>Test Connection</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+  if (window.lucide) lucide.createIcons();
+}
+window.showV5UpgradeGuide = showV5UpgradeGuide;
+
+
 function getSyncLogs() {
   try {
     return JSON.parse(localStorage.getItem('bpcl_google_sync_logs')) || [];
@@ -3571,18 +3753,24 @@ function renderGoogleSyncView() {
       <div class="flex items-center justify-between gap-4">
         <div>
           <div class="flex items-center gap-2">
-            <h1 class="text-2xl sm:text-3xl font-bold text-slate-900 font-display tracking-tight">Google Sheets & Drive Sync</h1>
+            <h1 class="text-2xl sm:text-3xl font-bold text-slate-900 font-display tracking-tight">Google Sheets &amp; Drive Sync</h1>
             <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
-              Live Cloud Bridge v5.0
+              Live Cloud Bridge
             </span>
           </div>
           <p class="text-xs text-slate-500 mt-1">Automatic two-way multi-user sync with Google Sheets & photo uploads to Google Drive.</p>
         </div>
 
-        <button onclick="testGoogleConnection()" class="inline-flex h-9 items-center justify-center rounded-lg bg-blue-600 text-white px-3.5 text-xs font-bold hover:bg-blue-700 shadow transition gap-1.5">
-          <i data-lucide="zap" class="h-4 w-4 text-amber-300"></i>
-          <span>Test Connection</span>
-        </button>
+        <div class="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+          <button onclick="showV5UpgradeGuide()" class="inline-flex h-9 items-center justify-center rounded-lg bg-amber-500 text-white px-3.5 text-xs font-bold hover:bg-amber-600 shadow transition gap-1.5">
+            <i data-lucide="arrow-up-circle" class="h-4 w-4"></i>
+            <span>Fix Live Sync</span>
+          </button>
+          <button onclick="testGoogleConnection()" class="inline-flex h-9 items-center justify-center rounded-lg bg-blue-600 text-white px-3.5 text-xs font-bold hover:bg-blue-700 shadow transition gap-1.5">
+            <i data-lucide="zap" class="h-4 w-4 text-amber-300"></i>
+            <span>Test Connection</span>
+          </button>
+        </div>
       </div>
 
       <!-- Live Two-Way Sync Action Banner -->
@@ -3947,17 +4135,21 @@ window.testGoogleConnection = async () => {
     } catch(qErr) {}
 
     if (isV5) {
+      _syncBarV5Checked = true;
+      updateGlobalSyncBar('v5_ok');
       showToast({
         title: "✅ Full Two-Way Sync Active!",
         description: "Google Apps Script v5.0 is active! Automatic live sync is enabled for all users across all devices.",
         variant: "success"
       });
     } else {
+      updateGlobalSyncBar('push_only');
       showToast({
-        title: "✅ Webhook Live (Push Active)",
-        description: "Google Sheet & Drive photo push is operational! To enable automatic multi-user sync: click 'Copy Code.gs' below and select 'New version' when deploying.",
+        title: "⚠️ Webhook Live (Push-Only)",
+        description: "Data pushes to Google Sheets are working! But live pull sync requires Apps Script v5.0. Tap 'How to Fix' in the status bar above to upgrade in 2 minutes.",
         variant: "default"
       });
+      setTimeout(() => showV5UpgradeGuide(), 1500);
     }
   } catch(e) {
     console.warn("Connection test failed:", e);
@@ -4194,11 +4386,23 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // 4. Auto-sync when device reconnects to internet
+  // 4. Auto-sync + update sync bar when device reconnects to internet
   window.addEventListener('online', () => {
+    _syncBarV5Checked = false;
     window.syncPendingQueueNow();
     store.syncFromGoogleCloud(true);
+    checkSyncCapabilityAndUpdateBar();
   });
+
+  // 5. Update sync bar when device goes offline
+  window.addEventListener('offline', () => {
+    updateGlobalSyncBar('offline');
+  });
+
+  // 6. Check sync capability on startup (shows amber warning if GAS is v4, green if v5)
+  setTimeout(() => {
+    checkSyncCapabilityAndUpdateBar();
+  }, 2000); // slight delay to let page settle
 
   // PWA Modal button listeners
   const confirmInstallBtn = document.getElementById('btn-pwa-confirm-install');
