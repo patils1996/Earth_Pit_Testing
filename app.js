@@ -227,7 +227,9 @@ class Store {
                 if (remoteR) {
                   const remoteUpdated = remoteR.updatedAt || remoteR.testDate || '';
                   const localUpdated = localR.updatedAt || localR.testDate || '';
-                  if (remoteUpdated > localUpdated) {
+                  const remotePits = (remoteR.pits || []).length;
+                  const localPits = (localR.pits || []).length;
+                  if (remoteUpdated > localUpdated || remotePits > localPits) {
                     hasNewer = true;
                     return remoteR;
                   }
@@ -258,76 +260,97 @@ class Store {
     });
   }
 
+
   async syncFromGoogleCloud(force = false) {
     const webhookUrl = getGoogleWebhookUrl();
     if (!navigator.onLine || !webhookUrl) return { success: false, reason: "offline_or_no_url" };
+
     try {
       let data = null;
-      // 1. Try GET query
+
+      // --- Try GET ?action=get_reports (works with GAS v5.0 and v5.1) ---
       try {
-        const resp = await fetch(`${webhookUrl}?action=get_reports&_t=${Date.now()}`);
-        if (resp.ok) data = await resp.json().catch(() => null);
+        const resp = await fetch(`${webhookUrl}?action=get_reports&_t=${Date.now()}`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' }
+        });
+        if (resp.ok) {
+          data = await resp.json().catch(() => null);
+        }
       } catch(getErr) {
-        console.warn("[CloudSync] GET failed, attempting POST query fallback...", getErr);
+        console.warn('[CloudSync] GET failed, trying POST...', getErr);
       }
 
-      // 2. Fallback to POST query if GET did not return reports array
+      // --- Fallback: POST action=get_reports ---
       if (!data || !Array.isArray(data.reports)) {
         try {
           const postResp = await fetch(webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify({ action: "get_reports", timestamp: new Date().toISOString() })
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify({ action: 'get_reports', timestamp: new Date().toISOString() })
           });
           if (postResp.ok) data = await postResp.json().catch(() => null);
-        } catch(postErr) {}
+        } catch(postErr) {
+          console.warn('[CloudSync] POST fallback also failed:', postErr);
+        }
       }
 
-      if (data && data.status === "success" && Array.isArray(data.reports) && data.reports.length > 0) {
+      // --- Process cloud data ---
+      if (data && data.status === 'success' && Array.isArray(data.reports) && data.reports.length > 0) {
         let updatedCount = 0;
         const localMap = new Map(this.reports.map(r => [String(r.retailCode || r.id), r]));
+
         data.reports.forEach(cloudR => {
           const key = String(cloudR.retailCode || cloudR.id);
           const localR = localMap.get(key);
+
           if (!localR) {
+            // New site from cloud — add it
             this.reports.push(cloudR);
             localMap.set(key, cloudR);
             updatedCount++;
           } else {
-            const cloudTime = cloudR.updatedAt || cloudR.testDate || "";
-            const localTime = localR.updatedAt || localR.testDate || "";
-            const cloudPitsLen = (cloudR.pits || []).length;
-            const localPitsLen = (localR.pits || []).length;
-            // If cloud has newer test date, or same test date but more pits
-            if (cloudTime > localTime || (cloudTime === localTime && cloudPitsLen > localPitsLen) || force) {
+            // Compare timestamps — cloud wins if newer OR has more pits
+            const cloudTs = cloudR.updatedAt || cloudR.testDate || '';
+            const localTs = localR.updatedAt || localR.testDate || '';
+            const cloudPits = (cloudR.pits || []).length;
+            const localPits = (localR.pits || []).length;
+            const cloudNewer = cloudTs > localTs;
+            const sameTimeMorePits = (cloudTs === localTs && cloudPits > localPits);
+
+            if (cloudNewer || sameTimeMorePits || force) {
               const idx = this.reports.findIndex(r => String(r.retailCode || r.id) === key);
               if (idx !== -1) {
-                this.reports[idx] = { ...localR, ...cloudR };
+                // Merge: cloud data takes precedence for inspection fields
+                this.reports[idx] = Object.assign({}, localR, cloudR);
                 updatedCount++;
               }
             }
           }
         });
+
         if (updatedCount > 0 || force) {
           try { localStorage.setItem('earth-pit-reports', JSON.stringify(this.reports)); } catch(e) {}
           this.notify();
-          if (updatedCount > 0 && !force) {
+          if (updatedCount > 0) {
             showToast({
-              title: "☁️ Live Cloud Update",
-              description: `Received latest inspection updates for ${updatedCount} station(s).`,
-              variant: "default"
+              title: '☁️ Live Data Updated',
+              description: `Received ${updatedCount} updated site(s) from Google Drive cloud database.`,
+              variant: 'default'
             });
           }
         }
         try { localStorage.setItem('bpcl_last_cloud_sync', new Date().toISOString()); } catch(e) {}
-        return { success: true, count: data.reports.length, updated: updatedCount };
+        return { success: true, count: data.reports.length, updated: updatedCount, source: data.source || 'cloud' };
       }
+
+      return { success: false, reason: 'no_cloud_records' };
     } catch (err) {
-      console.warn("[CloudSync] Background sync check failed:", err);
+      console.warn('[CloudSync] sync failed:', err);
       return { success: false, reason: err.message };
     }
-    return { success: false, reason: "no_cloud_records" };
   }
+
 
   subscribe(listener) {
     this.listeners.push(listener);
@@ -461,26 +484,36 @@ function updateGlobalSyncBar(state, detail) {
   if (!bar || !inner || !dot || !msg) return;
 
   if (state === 'v5_ok') {
-    bar.classList.add('hidden');
+    bar.classList.remove('hidden');
     inner.className = 'flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-emerald-50 border-b border-emerald-200 text-emerald-800';
     dot.className = 'h-2 w-2 rounded-full bg-emerald-500 shrink-0';
-    msg.textContent = '✅ Live Bidirectional Sync Active — all users share real-time data.';
-    if (btn) { btn.textContent = 'Sync Now'; btn.className = 'px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700 transition'; }
+    const countText = detail && detail.count !== undefined ? ` (${detail.count} sites in cloud)` : '';
+    msg.textContent = `☁️ Google Drive Live Database: Active${countText} — all devices share live data in real time.`;
+    if (btn) {
+      btn.textContent = 'Sync Now';
+      btn.className = 'px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-bold hover:bg-emerald-700 transition cursor-pointer shadow-sm';
+      btn.onclick = () => triggerLiveCloudSync(btn);
+    }
   } else if (state === 'push_only') {
     bar.classList.remove('hidden');
-    inner.className = 'flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-amber-50 border-b border-amber-200 text-amber-800';
-    dot.className = 'h-2 w-2 rounded-full bg-amber-400 animate-pulse shrink-0';
-    msg.textContent = '⚠️ Sync is push-only — other users\' data won\'t auto-update here. Tap to fix.';
-    if (btn) { btn.textContent = 'How to Fix'; btn.className = 'px-2 py-0.5 rounded-full bg-amber-600 text-white text-[10px] font-bold hover:bg-amber-700 transition'; btn.onclick = () => showV5UpgradeGuide(); }
+    inner.className = 'flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-amber-50 border-b border-amber-200 text-amber-900';
+    dot.className = 'h-2 w-2 rounded-full bg-amber-500 animate-pulse shrink-0';
+    msg.textContent = '⚠️ Google Drive Live DB v5.2 needs deploy to enable multi-device live sync. Click to setup.';
+    if (btn) {
+      btn.textContent = 'Setup v5.2 (2 min)';
+      btn.className = 'px-2.5 py-0.5 rounded-full bg-amber-600 text-white text-[10px] font-bold hover:bg-amber-700 transition cursor-pointer shadow-sm';
+      btn.onclick = () => showV5UpgradeGuide();
+    }
   } else if (state === 'offline') {
     bar.classList.remove('hidden');
     inner.className = 'flex items-center justify-between px-4 py-1.5 text-[11px] font-semibold bg-slate-100 border-b border-slate-200 text-slate-600';
     dot.className = 'h-2 w-2 rounded-full bg-slate-400 shrink-0';
     msg.textContent = '📴 You are offline — data saved locally, will sync when connection restores.';
-    if (btn) { btn.textContent = 'Retry'; btn.className = 'px-2 py-0.5 rounded-full bg-slate-500 text-white text-[10px] font-bold hover:bg-slate-600 transition'; btn.onclick = () => { triggerLiveCloudSync(btn); }; }
-  } else {
-    // checking
-    bar.classList.add('hidden');
+    if (btn) {
+      btn.textContent = 'Retry';
+      btn.className = 'px-2 py-0.5 rounded-full bg-slate-500 text-white text-[10px] font-bold hover:bg-slate-600 transition cursor-pointer';
+      btn.onclick = () => { triggerLiveCloudSync(btn); };
+    }
   }
 }
 
@@ -493,9 +526,9 @@ async function checkSyncCapabilityAndUpdateBar() {
     const resp = await fetch(`${url}?action=get_reports&_t=${Date.now()}`);
     if (resp.ok) {
       const data = await resp.json().catch(() => null);
-      if (data && data.status === 'success' && Array.isArray(data.reports)) {
+      if (data && data.status === 'success' && (data.source === 'google_drive_live_db' || Array.isArray(data.reports))) {
         _syncBarV5Checked = true;
-        updateGlobalSyncBar('v5_ok');
+        updateGlobalSyncBar('v5_ok', data);
         return;
       }
     }
@@ -522,9 +555,9 @@ function showV5UpgradeGuide() {
                 <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-white/20 border border-white/30">ACTION REQUIRED</span>
                 <span class="text-[11px] text-blue-200 font-medium">One-time 2-minute setup</span>
               </div>
-              <h2 class="text-lg font-bold font-display">Enable Live Multi-User Sync</h2>
+              <h2 class="text-lg font-bold font-display">Enable Live Google Drive Cloud Database (v5.2)</h2>
               <p class="text-xs text-blue-200">
-                Your Google Apps Script needs upgrading to <strong class="text-white">v5.0</strong> to enable real-time bidirectional sync across all users' phones and laptops.
+                Upgrading to <strong class="text-white">v5.2</strong> turns your Google Drive into the live data storage server. Any update saved on laptop or phone automatically syncs to all devices in real time.
               </p>
             </div>
             <button onclick="document.getElementById('v5-upgrade-modal').remove()" class="text-white/60 hover:text-white ml-4 mt-1 shrink-0">
@@ -538,8 +571,8 @@ function showV5UpgradeGuide() {
           <div class="flex gap-3 p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900">
             <i data-lucide="alert-triangle" class="h-4 w-4 text-amber-600 shrink-0 mt-0.5"></i>
             <div>
-              <p class="font-bold">Current: Push-Only Mode (v4.0)</p>
-              <p class="text-amber-700 mt-0.5">Inspections ARE being saved to Google Sheets. But other devices <strong>cannot pull updated data</strong> from the cloud — so when you update BP Kotur 1 on this phone, the mobile/laptop of another user won't see it until GAS v5.0 is deployed.</p>
+              <p class="font-bold">Current State: Google Drive Live DB Not Yet Activated</p>
+              <p class="text-amber-700 mt-0.5">When you update BP Kotur 1 or any station on your laptop, the update must be written to <code class="font-mono bg-amber-100 px-1 rounded">bpcl_live_database.json</code> on Google Drive so mobile phones can download it. Deploying v5.2 enables this 100%.</p>
             </div>
           </div>
         </div>
@@ -576,7 +609,7 @@ function showV5UpgradeGuide() {
               <span class="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center text-[11px] font-bold shrink-0">3</span>
               <div>
                 <p class="font-bold text-slate-900">Deploy as New Version</p>
-                <p class="text-slate-500 mt-0.5">Click <strong>Deploy → Manage deployments → Edit (✏️) → Version: New version</strong> → Description: <em>"v5.0 Bidirectional Sync"</em> → Click <strong>Deploy</strong>.</p>
+                <p class="text-slate-500 mt-0.5">Click <strong>Deploy → Manage deployments → Edit (✏️) → Version: New version</strong> → Description: <em>"v5.2 Google Drive Live Database"</em> → Click <strong>Deploy</strong>.</p>
                 <div class="mt-1.5 p-2 bg-emerald-100 rounded-lg text-[10px] text-emerald-900 font-medium">
                   ✅ Keep "Execute as: Me" and "Who has access: Anyone"
                 </div>
@@ -587,7 +620,7 @@ function showV5UpgradeGuide() {
               <span class="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[11px] font-bold shrink-0">4</span>
               <div>
                 <p class="font-bold text-slate-900">Come back & Verify</p>
-                <p class="text-slate-500 mt-0.5">After deploying, close the Apps Script tab, return here and click <strong>"Test Connection"</strong> below. The status bar will turn green once v5.0 is confirmed.</p>
+                <p class="text-slate-500 mt-0.5">After deploying, close the Apps Script tab, return here and click <strong>"Test Connection"</strong> below. The status bar will turn green once v5.2 is confirmed.</p>
               </div>
             </div>
           </div>
@@ -678,7 +711,8 @@ function updatePendingBadge() {
 }
 
 /**
- * Push Inspection Data & Photos to Google Sheet & Google Drive
+ * Push Inspection Data & Photos to Google Sheet & Google Drive (via GAS v5.1)
+ * GAS v5.1 also writes live_data.json to Drive so all devices can read it back.
  */
 async function pushToGoogle(reportData, photosArray = []) {
   const webhookUrl = getGoogleWebhookUrl();
@@ -689,6 +723,7 @@ async function pushToGoogle(reportData, photosArray = []) {
   const payload = {
     action: "update_test",
     timestamp: new Date().toISOString(),
+    retailCode: reportData.retailCode,
     roid: reportData.retailCode,
     siteName: reportData.siteName,
     salesArea: reportData.salesArea,
@@ -702,7 +737,8 @@ async function pushToGoogle(reportData, photosArray = []) {
     earthTesterMake: reportData.earthTesterMake || "Waco",
     earthTesterSerial: reportData.earthTesterSerial || "WC-354672",
     pits: reportData.pits || [],
-    photos: photosArray // [{ pit: 'EP-1', base64: 'data:image...', name: '...' }]
+    photos: photosArray,
+    updatedAt: reportData.updatedAt || new Date().toISOString()
   };
 
   const logEntry = {
@@ -721,8 +757,8 @@ async function pushToGoogle(reportData, photosArray = []) {
     logEntry.details = 'Saved to offline queue. Will auto-push when online.';
     addSyncLog(logEntry);
     showToast({
-      title: "Saved to Offline Queue",
-      description: "No internet connection. Inspection and photos will push to Google Sheets & Drive automatically once back online.",
+      title: "Saved — Will Sync When Online",
+      description: "No internet. Inspection saved locally and queued for automatic sync when you reconnect.",
       variant: "default"
     });
     return;
@@ -731,28 +767,13 @@ async function pushToGoogle(reportData, photosArray = []) {
   if (!webhookUrl) {
     addToPendingQueue(payload);
     logEntry.status = 'Queued (No Webhook)';
-    logEntry.details = 'Inspection saved locally. Webhook URL not configured.';
+    logEntry.details = 'Webhook URL not configured. Set it in Google Sync page.';
     addSyncLog(logEntry);
     return;
   }
 
   try {
-    showToast({ title: "Google Sync", description: "Pushing inspection row to Google Sheet & uploading photos to Google Drive...", variant: "default" });
-
-    // Step 1: Probe endpoint reachability to avoid silent 403 drops
-    let endpointReachable = false;
-    try {
-      const probe = await fetch(webhookUrl, { method: "GET" });
-      if (probe.ok) endpointReachable = true;
-    } catch(probeErr) {
-      endpointReachable = false;
-    }
-
-    if (!endpointReachable) {
-      throw new Error("Google Webhook rejected connection (HTTP 403 Access Denied: You need access). Ensure deployment has 'Who has access: Anyone'.");
-    }
-
-    // Step 2: Post payload with text/plain (avoids CORS preflight rejection)
+    // POST to Google Apps Script
     const resp = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -760,36 +781,57 @@ async function pushToGoogle(reportData, photosArray = []) {
     });
 
     if (!resp.ok) {
-      throw new Error(`Google Webhook returned HTTP ${resp.status}`);
+      const errText = await resp.text().catch(() => '');
+      if (resp.status === 403) {
+        throw new Error("HTTP 403 Access Denied — Google Apps Script needs redeployment with 'Who has access: Anyone'");
+      }
+      throw new Error(`Google returned HTTP ${resp.status}: ${errText.substring(0, 100)}`);
     }
 
     const resData = await resp.json().catch(() => null);
     if (resData && resData.status === "error") {
-      throw new Error(resData.message || "Google Apps Script internal execution error");
+      throw new Error(resData.message || "Google Apps Script internal error");
     }
 
-    const folderInfo = resData && resData.folderName ? ` in "${resData.folderName}"` : '';
+    // ✅ GAS v5.1: store the live Drive file ID for future reads
+    if (resData && resData.liveDataFileId) {
+      try { localStorage.setItem('bpcl_drive_live_file_id', resData.liveDataFileId); } catch(e) {}
+      // Mark that bidirectional sync is now confirmed working
+      _syncBarV5Checked = true;
+      updateGlobalSyncBar('v5_ok');
+    }
+
     logEntry.status = 'Synced to Google';
-    logEntry.details = `Pushed row to Google Sheet & saved ${photosArray.length} photo(s) to Drive${folderInfo}.`;
+    logEntry.details = `Pushed to Google Sheet & Drive. ${resData?.liveDataUpdated ? 'Live DB updated — all devices will see new data.' : ''}`;
     addSyncLog(logEntry);
 
     showToast({
-      title: "Google Sync Complete",
-      description: `Google Sheet updated and photos saved in Drive folder (${resData?.folderName || reportData.siteName}).`,
+      title: "✅ Saved to Google Cloud",
+      description: resData?.liveDataUpdated
+        ? `Saved! Google Drive live database updated — all users will see this data now.`
+        : `Saved to Google Sheet & Drive folder (${resData?.folderName || reportData.siteName}).`,
       variant: "success"
     });
+
   } catch (err) {
     console.error("Google sync error:", err);
     addToPendingQueue(payload);
-    logEntry.status = 'Sync Blocked (403)';
-    logEntry.details = `Data saved locally. Google rejected push: ${err.message}`;
+    logEntry.status = 'Sync Failed';
+    logEntry.details = `Saved locally. Error: ${err.message}`;
     addSyncLog(logEntry);
 
+    const isAccessDenied = err.message && (err.message.includes('403') || err.message.includes('Access Denied'));
     showToast({
-      title: "Google Sync Blocked (403)",
-      description: "Inspection saved locally on device. Google rejected cloud sync (403 Access Denied). Check 'Google Sync' tab for the 30-sec fix.",
+      title: isAccessDenied ? "⚠️ Google Script Needs Update" : "Cloud Sync Failed",
+      description: isAccessDenied
+        ? "Inspection saved locally. Tap 'Fix Live Sync' in the Google Sync page to update the script (2 minutes)."
+        : `Saved locally. Will retry when online. Error: ${err.message.substring(0, 80)}`,
       variant: "destructive"
     });
+
+    if (isAccessDenied && typeof showV5UpgradeGuide === 'function') {
+      setTimeout(() => showV5UpgradeGuide(), 2000);
+    }
   }
 }
 
@@ -3741,226 +3783,285 @@ window.triggerLiveCloudSync = async (btnElement = null) => {
   }
 };
 
+window.seedGoogleDriveLiveDB = async (btnElement) => {
+  const webhookUrl = getGoogleWebhookUrl();
+  if (!webhookUrl) {
+    showToast({ title: "No Webhook", description: "Webhook URL is not configured.", variant: "destructive" });
+    return;
+  }
+  const allReports = store.getReports();
+  if (!allReports || allReports.length === 0) {
+    showToast({ title: "No Local Data", description: "No reports to upload.", variant: "default" });
+    return;
+  }
+
+  let origHtml = "";
+  if (btnElement) {
+    origHtml = btnElement.innerHTML;
+    btnElement.disabled = true;
+    btnElement.innerHTML = `<i data-lucide="loader-2" class="h-3.5 w-3.5 animate-spin"></i><span>Uploading ${allReports.length} Sites...</span>`;
+    if (window.lucide) lucide.createIcons();
+  }
+
+  showToast({
+    title: "Uploading to Google Drive",
+    description: `Uploading all ${allReports.length} stations to bpcl_live_database.json in Google Drive...`,
+    variant: "default"
+  });
+
+  try {
+    const chunkSize = 50;
+    let uploaded = 0;
+    for (let i = 0; i < allReports.length; i += chunkSize) {
+      const chunk = allReports.slice(i, i + chunkSize);
+      const resp = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({
+          action: "bulk_sync",
+          reports: chunk,
+          timestamp: new Date().toISOString()
+        })
+      });
+      if (resp.ok) {
+        uploaded += chunk.length;
+      }
+    }
+
+    showToast({
+      title: "✅ Upload Complete!",
+      description: `Successfully uploaded ${uploaded} stations to Google Drive Live Database! All mobile users will now see complete updated data.`,
+      variant: "success"
+    });
+    localStorage.setItem('bpcl_last_cloud_sync', new Date().toISOString());
+    renderGoogleSyncView();
+  } catch(err) {
+    showToast({
+      title: "Upload Failed",
+      description: err.message,
+      variant: "destructive"
+    });
+  } finally {
+    if (btnElement) {
+      btnElement.disabled = false;
+      btnElement.innerHTML = origHtml;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+};
+
 function renderGoogleSyncView() {
   const currentUrl = getGoogleWebhookUrl();
   const logs = getSyncLogs();
   const queue = getPendingQueue();
   const isCustom = (currentUrl !== MASTER_GAS_WEBHOOK_URL);
+  const lastSync = localStorage.getItem('bpcl_last_cloud_sync');
+  const lastSyncText = lastSync ? 'Last sync: ' + new Date(lastSync).toLocaleTimeString() : 'Never synced yet';
+  const syncOk = _syncBarV5Checked && _syncBarState === 'v5_ok';
+  const totalLocalSites = (store.getReports() || []).length;
 
   const html = `
-    <div class="space-y-6 fade-in max-w-4xl mx-auto pb-16">
+    <div class="space-y-5 fade-in max-w-4xl mx-auto pb-20">
       <!-- Header -->
-      <div class="flex items-center justify-between gap-4">
+      <div class="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <div class="flex items-center gap-2">
-            <h1 class="text-2xl sm:text-3xl font-bold text-slate-900 font-display tracking-tight">Google Sheets &amp; Drive Sync</h1>
-            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
-              Live Cloud Bridge
+            <h1 class="text-2xl sm:text-3xl font-bold text-slate-900 font-display tracking-tight">Google Cloud Sync</h1>
+            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+              Live Drive DB v5.2
             </span>
           </div>
-          <p class="text-xs text-slate-500 mt-1">Automatic two-way multi-user sync with Google Sheets & photo uploads to Google Drive.</p>
+          <p class="text-xs text-slate-500 mt-1">Google Drive as live cloud database + Google Sheets as backup archive.</p>
         </div>
 
-        <div class="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-          <button onclick="showV5UpgradeGuide()" class="inline-flex h-9 items-center justify-center rounded-lg bg-amber-500 text-white px-3.5 text-xs font-bold hover:bg-amber-600 shadow transition gap-1.5">
-            <i data-lucide="arrow-up-circle" class="h-4 w-4"></i>
-            <span>Fix Live Sync</span>
+        <div class="flex items-center gap-2 shrink-0 flex-wrap">
+          <button onclick="showV5UpgradeGuide()" class="inline-flex h-9 items-center justify-center rounded-xl bg-amber-500 hover:bg-amber-600 text-white px-3.5 text-xs font-bold shadow transition gap-1.5 cursor-pointer">
+            <i data-lucide="book-open" class="h-4 w-4"></i>
+            <span>Setup Guide (v5.2)</span>
           </button>
-          <button onclick="testGoogleConnection()" class="inline-flex h-9 items-center justify-center rounded-lg bg-blue-600 text-white px-3.5 text-xs font-bold hover:bg-blue-700 shadow transition gap-1.5">
+          <button onclick="testGoogleConnection()" class="inline-flex h-9 items-center justify-center rounded-xl bg-blue-600 hover:bg-blue-700 text-white px-3.5 text-xs font-bold shadow transition gap-1.5 cursor-pointer">
             <i data-lucide="zap" class="h-4 w-4 text-amber-300"></i>
             <span>Test Connection</span>
           </button>
         </div>
       </div>
 
-      <!-- Live Two-Way Sync Action Banner -->
-      <div class="bg-gradient-to-r from-blue-600 to-indigo-700 text-white rounded-xl p-5 shadow-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div class="space-y-1">
-          <div class="flex items-center gap-2">
-            <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-white/20 text-white border border-white/30">
-              <span class="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span>Bidirectional Live Sync</span>
-            </span>
-            <span class="text-xs text-blue-100">${getLastCloudSyncText()}</span>
+      <!-- Live Sync Status Banner -->
+      ${syncOk ? `
+        <div class="bg-gradient-to-r from-emerald-600 to-teal-700 text-white rounded-2xl p-5 shadow-lg space-y-3">
+          <div class="flex items-start justify-between gap-4 flex-wrap">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+                <i data-lucide="check-circle-2" class="h-5 w-5 text-white"></i>
+              </div>
+              <div>
+                <h2 class="text-base font-bold font-display">Google Drive Live Database Active</h2>
+                <p class="text-xs text-emerald-100 mt-0.5">Live file: <code class="bg-black/20 px-1.5 py-0.5 rounded text-white font-mono">bpcl_live_database.json</code> &bull; ${lastSyncText}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button onclick="triggerLiveCloudSync(this)" class="px-4 py-2 rounded-xl bg-white text-emerald-800 text-xs font-bold shadow hover:bg-emerald-50 transition flex items-center gap-1.5 cursor-pointer active:scale-95">
+                <i data-lucide="refresh-cw" class="h-4 w-4 text-emerald-600"></i>
+                <span>Sync Now</span>
+              </button>
+            </div>
           </div>
-          <h2 class="text-base sm:text-lg font-bold font-display">Multi-Device Cloud Synchronization</h2>
-          <p class="text-xs text-blue-100 max-w-xl">
-            Pull latest test results and station details (including 12+ earth pits) updated from any laptop or mobile phone, and push pending tests.
-          </p>
+          <div class="border-t border-white/20 pt-3 flex items-center justify-between flex-wrap gap-2 text-xs">
+            <span class="text-emerald-100">Any inspection saved on this device or mobile instantly syncs across all users.</span>
+            <button onclick="seedGoogleDriveLiveDB(this)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-800/60 hover:bg-emerald-800 text-white text-[11px] font-bold border border-white/30 transition cursor-pointer">
+              <i data-lucide="upload-cloud" class="h-3.5 w-3.5"></i>
+              <span>Upload All ${totalLocalSites} Sites to Drive Live DB</span>
+            </button>
+          </div>
         </div>
-        <button type="button" onclick="triggerLiveCloudSync(this)" class="px-4 py-2.5 rounded-xl bg-white text-blue-800 text-xs font-bold shadow-lg hover:bg-blue-50 transition flex items-center gap-2 shrink-0 active:scale-95 cursor-pointer">
-          <i data-lucide="refresh-cw" class="h-4 w-4 text-blue-600"></i>
-          <span>Sync Now (Pull & Push)</span>
-        </button>
-      </div>
+      ` : `
+        <div class="bg-gradient-to-br from-slate-900 to-blue-950 text-white rounded-2xl p-5 shadow-lg border border-slate-700 space-y-4">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-400 flex items-center justify-center shrink-0">
+                <i data-lucide="hard-drive" class="h-5 w-5"></i>
+              </div>
+              <div>
+                <h2 class="text-base font-bold font-display flex items-center gap-2">
+                  <span>Google Drive Live Cloud Database (v5.2)</span>
+                  <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-400/20 text-amber-300 border border-amber-400/30">Action Required</span>
+                </h2>
+                <p class="text-xs text-slate-300 mt-0.5">To allow mobile and laptop to share updates automatically, deploy the updated v5.2 Google Apps Script.</p>
+              </div>
+            </div>
+            <button onclick="copyAppsScriptCode()" class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold shadow transition cursor-pointer">
+              <i data-lucide="copy" class="h-3.5 w-3.5"></i>
+              <span>Copy Code.gs</span>
+            </button>
+          </div>
 
-      <!-- Connection Status Card -->
-      <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
-        <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+          <div class="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs text-slate-200">
+            <div class="bg-white/5 border border-white/10 rounded-xl p-3 space-y-1">
+              <span class="w-5 h-5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px] font-bold">1</span>
+              <p class="font-bold text-white">Copy Code</p>
+              <p class="text-[11px] text-slate-400">Click "Copy Code.gs" above.</p>
+            </div>
+            <div class="bg-white/5 border border-white/10 rounded-xl p-3 space-y-1">
+              <span class="w-5 h-5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px] font-bold">2</span>
+              <p class="font-bold text-white">Open Apps Script</p>
+              <p class="text-[11px] text-slate-400"><a href="https://script.google.com" target="_blank" class="text-blue-400 underline">script.google.com</a> &rarr; paste into Code.gs (Ctrl+A, paste).</p>
+            </div>
+            <div class="bg-white/5 border border-white/10 rounded-xl p-3 space-y-1">
+              <span class="w-5 h-5 rounded-full bg-amber-500 text-white flex items-center justify-center text-[10px] font-bold">3</span>
+              <p class="font-bold text-white">Deploy New Version</p>
+              <p class="text-[11px] text-amber-300">Manage deployments &rarr; Edit &rarr; New version &rarr; Deploy.</p>
+            </div>
+            <div class="bg-white/5 border border-white/10 rounded-xl p-3 space-y-1">
+              <span class="w-5 h-5 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px] font-bold">4</span>
+              <p class="font-bold text-white">Verify</p>
+              <p class="text-[11px] text-slate-400">Click "Test Connection" to activate.</p>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between pt-1 border-t border-white/10 flex-wrap gap-2">
+            <span class="text-[11px] text-slate-400">Takes 2 minutes &bull; Free Google Drive cloud database</span>
+            <div class="flex items-center gap-2">
+              <button onclick="seedGoogleDriveLiveDB(this)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600/80 hover:bg-blue-600 text-white text-xs font-bold transition cursor-pointer">
+                <i data-lucide="upload-cloud" class="h-3.5 w-3.5"></i>
+                <span>Upload All ${totalLocalSites} Sites to Drive Live DB</span>
+              </button>
+              <button onclick="triggerLiveCloudSync(this)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition cursor-pointer">
+                <i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>
+                <span>Pull from Cloud</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      `}
+
+      <!-- Webhook URL Configuration Card -->
+      <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-100 pb-3 flex-wrap gap-2">
           <div class="flex items-center gap-2.5">
             <div class="w-10 h-10 rounded-lg ${isGoogleSyncUnlocked ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'} flex items-center justify-center">
-              <i data-lucide="${isGoogleSyncUnlocked ? 'unlock' : 'cloud'}" class="h-5 w-5"></i>
+              <i data-lucide="${isGoogleSyncUnlocked ? 'unlock' : 'link'}" class="h-5 w-5"></i>
             </div>
             <div>
-              <h2 class="text-sm font-bold text-slate-900">Master Google Apps Script Webhook</h2>
-              <p class="text-[11px] text-slate-400">
-                ${isGoogleSyncUnlocked ? 'Administrator Mode Active &bull; Endpoint can now be edited' : 'Centrally locked production endpoint &bull; Protected by password ("Patil")'}
-              </p>
+              <h2 class="text-sm font-bold text-slate-900">Google Apps Script Webhook Endpoint</h2>
+              <p class="text-[11px] text-slate-400">${isGoogleSyncUnlocked ? 'Administrator Mode Active • Unlocked' : 'Production Webhook • Password Protected ("Patil")'}</p>
             </div>
           </div>
           ${isGoogleSyncUnlocked ? `
             <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
               <i data-lucide="unlock" class="h-3 w-3"></i>
-              <span>Admin Mode &bull; Unlocked</span>
+              <span>Admin Mode</span>
             </span>
           ` : `
-            <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1.5">
-              <i data-lucide="lock" class="h-3 w-3"></i>
-              <span>Locked &bull; Tamper-Proof</span>
-            </span>
+            <button onclick="promptUnlockGoogleSync()" class="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-xs font-bold transition cursor-pointer">
+              <i data-lucide="key" class="h-3.5 w-3.5 text-amber-600"></i>
+              <span>Unlock to Edit</span>
+            </button>
           `}
         </div>
 
-        <div class="space-y-2.5">
+        <div class="space-y-2">
           <div class="flex flex-col sm:flex-row gap-2">
-            <div class="relative flex-1">
-              <i data-lucide="${isGoogleSyncUnlocked ? 'link' : 'lock'}" class="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 ${isGoogleSyncUnlocked ? 'text-blue-500' : 'text-slate-400'}"></i>
-              <input 
-                type="url" 
-                id="google-webhook-input" 
-                ${isGoogleSyncUnlocked ? '' : 'readonly disabled'}
-                value="${escapeHtml(currentUrl)}" 
-                placeholder="https://script.google.com/macros/s/.../exec"
-                class="w-full pl-9 pr-3 py-2 text-xs rounded-lg border ${isGoogleSyncUnlocked ? 'border-blue-400 bg-white text-slate-900 focus:ring-2 focus:ring-blue-500' : 'border-slate-200 bg-slate-100 text-slate-700 font-mono select-all cursor-not-allowed'}"
-              />
-            </div>
+            <input 
+              type="url" 
+              id="google-webhook-input" 
+              ${isGoogleSyncUnlocked ? '' : 'readonly disabled'}
+              value="${escapeHtml(currentUrl)}" 
+              placeholder="https://script.google.com/macros/s/.../exec"
+              class="w-full px-3 py-2 text-xs rounded-lg border ${isGoogleSyncUnlocked ? 'border-blue-400 bg-white text-slate-900 focus:ring-2 focus:ring-blue-500' : 'border-slate-200 bg-slate-50 text-slate-600 font-mono select-all'}"
+            />
             ${isGoogleSyncUnlocked ? `
-              <div class="flex items-center gap-1.5 shrink-0 flex-wrap sm:flex-nowrap">
-                <button onclick="saveWebhookSettings()" class="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow transition cursor-pointer">
-                  <i data-lucide="check" class="h-3.5 w-3.5"></i>
-                  <span>Save URL</span>
-                </button>
-                <button onclick="resetWebhookSettings()" class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-xs font-semibold transition cursor-pointer" title="Reset to Master Webhook URL">
-                  <i data-lucide="rotate-ccw" class="h-3.5 w-3.5"></i>
-                  <span>Reset</span>
-                </button>
-                <button onclick="lockGoogleSync()" class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition cursor-pointer" title="Lock Settings">
-                  <i data-lucide="lock" class="h-3.5 w-3.5"></i>
-                  <span>Lock</span>
-                </button>
+              <div class="flex items-center gap-1.5 shrink-0">
+                <button onclick="saveWebhookSettings()" class="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow transition cursor-pointer">Save</button>
+                <button onclick="resetWebhookSettings()" class="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 text-xs font-semibold transition cursor-pointer">Reset</button>
+                <button onclick="lockGoogleSync()" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition cursor-pointer">Lock</button>
               </div>
-            ` : `
-              <button onclick="promptUnlockGoogleSync()" class="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shrink-0 shadow transition cursor-pointer">
-                <i data-lucide="key" class="h-4 w-4"></i>
-                <span>Unlock to Edit</span>
-              </button>
-            `}
+            ` : ''}
           </div>
-
-          ${isGoogleSyncUnlocked ? `
-            <p class="text-[11px] text-emerald-700 font-medium flex items-center gap-1.5">
-              <i data-lucide="check-circle" class="h-3.5 w-3.5 shrink-0 text-emerald-600"></i>
-              <span>Administrator mode active. Modify the URL above and click <strong>Save URL</strong>, or click <strong>Reset</strong> to restore default.</span>
-            </p>
-          ` : `
-            <p class="text-[11px] text-slate-500 flex items-center gap-1.5">
-              <i data-lucide="shield" class="h-3.5 w-3.5 text-amber-600 shrink-0"></i>
-              <span>Locked for standard operators. Click <strong>Unlock to Edit</strong> and enter administrator password ("Patil") to modify.</span>
-            </p>
-          `}
-
-          <p class="text-[11px] text-slate-400">Target Sheet: <strong>BPCL_Earthing_Testing_Records</strong> &bull; Target Drive Folder: <strong>BPCL_Earthing_Photos</strong> ${isCustom ? '<span class="text-amber-600 font-bold ml-1">(Custom URL active)</span>' : ''}</p>
+          <p class="text-[11px] text-slate-400">
+            Target Drive Live DB: <strong>bpcl_live_database.json</strong> &bull;
+            Target Photos: <strong>BPCL_Earthing_Photos</strong> &bull;
+            Target Sheet: <strong>BPCL_Earthing_Testing_Records</strong>
+          </p>
         </div>
       </div>
 
-      <!-- Pending Offline Queue Banner -->
+      <!-- Pending Queue Banner -->
       ${queue.length > 0 ? `
-        <div class="bg-amber-50 border border-amber-300 rounded-xl p-4 shadow-sm space-y-3">
-          <div class="flex items-center justify-between flex-wrap gap-2">
-            <div class="flex items-center gap-2.5">
-              <div class="w-8 h-8 rounded-lg bg-amber-200 text-amber-900 flex items-center justify-center shrink-0">
-                <i data-lucide="clock" class="h-4 w-4"></i>
-              </div>
-              <div>
-                <h3 class="text-sm font-bold text-amber-900">${queue.length} Inspection(s) Pending in Local Queue</h3>
-                <p class="text-[11px] text-amber-700">Stored safely on device. Once Webhook is set to 'Anyone', click Push to sync.</p>
-              </div>
+        <div class="bg-amber-50 border border-amber-300 rounded-2xl p-4 shadow-sm flex items-center justify-between flex-wrap gap-3">
+          <div class="flex items-center gap-2.5">
+            <div class="w-8 h-8 rounded-lg bg-amber-200 text-amber-900 flex items-center justify-center shrink-0">
+              <i data-lucide="clock" class="h-4 w-4"></i>
             </div>
-            <div class="flex items-center gap-2">
-              <button onclick="syncPendingQueueNow()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow transition cursor-pointer">
-                <i data-lucide="send" class="h-3.5 w-3.5"></i>
-                <span>Push All Pending Now (${queue.length})</span>
-              </button>
-              <button onclick="if(confirm('Clear offline pending queue?')){clearPendingQueue();renderGoogleSyncView();}" class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-600 border border-slate-300 text-xs font-medium transition cursor-pointer">
-                <i data-lucide="trash-2" class="h-3.5 w-3.5 text-rose-500"></i>
-                <span>Clear</span>
-              </button>
+            <div>
+              <h3 class="text-sm font-bold text-amber-900">${queue.length} Offline Inspection(s) Queued</h3>
+              <p class="text-[11px] text-amber-700">Stored safely on device. Click Push to sync to Google Drive.</p>
             </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="syncPendingQueueNow()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow transition cursor-pointer">
+              <i data-lucide="send" class="h-3.5 w-3.5"></i>
+              <span>Push All Now (${queue.length})</span>
+            </button>
+            <button onclick="if(confirm('Clear queue?')){clearPendingQueue();renderGoogleSyncView();}" class="px-2.5 py-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-600 border border-slate-300 text-xs font-medium transition cursor-pointer">
+              <i data-lucide="trash-2" class="h-3.5 w-3.5 text-rose-500"></i>
+            </button>
           </div>
         </div>
       ` : ''}
 
-      <!-- 403 Diagnostics Quick Card -->
-      <div class="bg-amber-50/70 border border-amber-200 rounded-xl p-4 shadow-sm space-y-2">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <i data-lucide="shield-alert" class="h-4 w-4 text-amber-600"></i>
-            <h3 class="text-xs font-bold text-amber-900 uppercase tracking-wider">Troubleshooting Cloud Sync (Why data may not save)</h3>
-          </div>
-          <button onclick="showGoogleSyncDiagnosticModal()" class="text-xs font-bold text-blue-700 hover:text-blue-800 underline flex items-center gap-1 cursor-pointer">
-            <span>View 30-Sec Fix Guide</span>
-            <i data-lucide="chevron-right" class="h-3.5 w-3.5"></i>
-          </button>
-        </div>
-        <p class="text-[11px] text-amber-800 leading-relaxed">
-          If inspection rows or photos are not appearing in Google Sheets/Drive, Google's server is rejecting connections with <strong>HTTP 403: Access Denied</strong>. In Google Apps Script, go to <strong>Deploy &gt; Manage deployments &gt; Edit</strong> and set <strong>Who has access: "Anyone"</strong>.
-        </p>
-      </div>
-
-      <!-- 1-Minute Setup Guide & Copy Script Accordion -->
-      <div class="bg-gradient-to-br from-slate-900 to-blue-950 text-white rounded-xl p-5 shadow-sm space-y-4">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2.5">
-            <i data-lucide="file-code" class="h-5 w-5 text-amber-400"></i>
-            <div>
-              <h3 class="text-sm font-bold font-display">Deploy to Your Google Account (1-Minute Guide)</h3>
-              <p class="text-xs text-slate-300">Zero-cost Google Apps Script to write Sheet rows and upload Drive photos</p>
-            </div>
-          </div>
-          <button onclick="copyAppsScriptCode()" class="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-xs font-bold text-white transition flex items-center gap-1.5 shadow">
-            <i data-lucide="copy" class="h-3.5 w-3.5"></i>
-            <span>Copy Code.gs</span>
-          </button>
-        </div>
-
-        <div class="bg-black/30 rounded-lg p-3 text-xs space-y-1 text-slate-200">
-          <p class="font-semibold text-amber-300 mb-1">Quick Steps:</p>
-          <p>1. Open Google Sheets at <a href="https://sheets.new" target="_blank" class="text-blue-400 underline font-mono">sheets.new</a></p>
-          <p>2. Click <strong>Extensions &gt; Apps Script</strong></p>
-          <p>3. Paste the copied code into <strong>Code.gs</strong></p>
-          <p>4. Click <strong>Deploy &gt; New deployment &gt; Select type: Web app</strong></p>
-          <p class="text-amber-300 font-bold">5. Set Execute as: "Me" and Who has access: "Anyone" (MANDATORY: If left as "Only myself", Google blocks all phones with 403 Access Denied)</p>
-          <p>6. Click <strong>Deploy</strong> and paste the URL into the box above!</p>
-        </div>
-      </div>
-
       <!-- Sync Activity Logs Table -->
-      <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden space-y-0">
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden space-y-0">
         <div class="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
           <h3 class="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
             <i data-lucide="history" class="h-4 w-4 text-blue-600"></i>
-            <span>Recent Sync Logs (${logs.length})</span>
+            <span>Recent Cloud Sync Logs (${logs.length})</span>
           </h3>
-          ${queue.length > 0 ? `
-            <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">
-              ${queue.length} Pending Offline
-            </span>
-          ` : ''}
+          ${queue.length > 0 ? `<span class="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800">${queue.length} Pending</span>` : ''}
         </div>
 
         <div class="max-h-64 overflow-y-auto divide-y divide-slate-100 text-xs">
           ${logs.length === 0 ? `
-            <div class="p-8 text-center text-slate-400">No sync activities recorded yet. When an MST submits an inspection, it will appear here.</div>
+            <div class="p-8 text-center text-slate-400">No sync activities recorded yet. When an inspection is submitted, it will appear here.</div>
           ` : logs.map(l => `
             <div class="p-3.5 flex items-center justify-between hover:bg-slate-50 transition">
               <div class="space-y-0.5">
@@ -4123,30 +4224,47 @@ window.testGoogleConnection = async () => {
     });
 
     // Step 3: Check bidirectional query capability
-    let isV5 = false;
+    let isV52 = false;
+    let isV50 = false;
+    let liveCount = 0;
     try {
       const queryCheck = await fetch(`${url}?action=get_reports&_t=${Date.now()}`);
       if (queryCheck.ok) {
         const qData = await queryCheck.json().catch(() => null);
         if (qData && qData.status === "success" && Array.isArray(qData.reports)) {
-          isV5 = true;
+          if (qData.version === "5.2" || qData.source === "google_drive_live_db") {
+            isV52 = true;
+          } else {
+            isV50 = true;
+          }
+          liveCount = qData.reports.length;
         }
       }
     } catch(qErr) {}
 
-    if (isV5) {
+    if (isV52) {
       _syncBarV5Checked = true;
-      updateGlobalSyncBar('v5_ok');
+      updateGlobalSyncBar('v5_ok', { count: liveCount });
       showToast({
-        title: "✅ Full Two-Way Sync Active!",
-        description: "Google Apps Script v5.0 is active! Automatic live sync is enabled for all users across all devices.",
+        title: "✅ Google Drive Live DB Active (v5.2)!",
+        description: `Connected! Google Drive live database contains ${liveCount} stations. Real-time multi-device sync is operational.`,
         variant: "success"
       });
+      if (window.location.hash === '#/google-sync') renderGoogleSyncView();
+    } else if (isV50) {
+      _syncBarV5Checked = true;
+      updateGlobalSyncBar('v5_ok', { count: liveCount });
+      showToast({
+        title: "Connected (v5.0)",
+        description: `Webhook is live with ${liveCount} stations. For Google Drive Live Database, upgrade to v5.2 when convenient.`,
+        variant: "success"
+      });
+      if (window.location.hash === '#/google-sync') renderGoogleSyncView();
     } else {
       updateGlobalSyncBar('push_only');
       showToast({
         title: "⚠️ Webhook Live (Push-Only)",
-        description: "Data pushes to Google Sheets are working! But live pull sync requires Apps Script v5.0. Tap 'How to Fix' in the status bar above to upgrade in 2 minutes.",
+        description: "Outgoing push to Google works! To enable live pulling of updates on mobile, deploy v5.2 (2 min).",
         variant: "default"
       });
       setTimeout(() => showV5UpgradeGuide(), 1500);
